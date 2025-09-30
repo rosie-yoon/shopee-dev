@@ -2,16 +2,18 @@
 """
 utils_common.py (Streamlit Secrets + Service Account 우선, OAuth 파일 fallback 지원)
 
-- 환경/Secrets 로딩
-- gspread 인증 (서비스계정 권장)
-- 문자열/헤더 정규화
-- Google Sheets 접근 유틸
+- 환경/Secrets 로딩 (Secrets 우선)
+- gspread 인증 (서비스계정 권장, 로컬 OAuth 폴백)
+- 문자열/헤더 정규화 유틸
+- Google Sheets 접근 유틸 (429 완화: 지수 백오프 + 워크시트 캐시)
 """
 
 from __future__ import annotations
+
 import os
 import re
 import time
+import random
 from pathlib import Path
 from typing import Optional, List, Dict, Callable
 
@@ -19,14 +21,13 @@ import gspread
 from gspread.exceptions import WorksheetNotFound
 from dotenv import load_dotenv
 
-# Streamlit/Google Auth (서비스계정)
+# Streamlit / Google Auth (서비스계정)
 try:
     import streamlit as st
     from google.oauth2.service_account import Credentials
-except Exception:
-    st = None
+except Exception:  # 로컬 스크립트 실행 등
+    st = None  # type: ignore
     Credentials = None  # type: ignore
-
 
 # =============================
 # 환경 변수 & .env 로딩
@@ -56,12 +57,14 @@ def get_env(name: str, default: str = "") -> str:
         return val
     return os.getenv(name, default).strip()
 
-def get_bool_env(name: str, default: bool=False) -> bool:
+def get_bool_env(name: str, default: bool = False) -> bool:
     v = _get_from_secrets(name).lower()
     if not v:
         v = os.getenv(name, "").strip().lower()
-    if v in ["1","true","yes","y"]: return True
-    if v in ["0","false","no","n"]: return False
+    if v in ["1", "true", "yes", "y"]:
+        return True
+    if v in ["0", "false", "no", "n"]:
+        return False
     return default
 
 def _env_path() -> str:
@@ -87,29 +90,49 @@ def save_env_value(key: str, value: str):
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
-
 # =============================
 # 공통 유틸
 # =============================
-def with_retry(fn: Callable, retries: int=3, delay: float=2.0):
-    """API 요청 재시도 래퍼"""
+# 워크시트 캐시 (동일 시트/탭 반복 접근 시 Read 요청 절약)
+_WS_CACHE: dict[tuple[str, str], gspread.Worksheet] = {}
+
+def _ws_cache_key(sh, name: str):
+    sid = getattr(sh, "id", None) or getattr(sh, "spreadsheet_id", None) or ""
+    return (sid, name)
+
+def with_retry(
+    fn: Callable,
+    retries: int = 6,
+    delay: float = 0.8,
+    backoff: float = 1.8,
+    jitter: float = 0.3,
+):
+    """
+    gspread 호출용 재시도. 429면 지수 백오프(+지터)로 재시도.
+    """
     last_err = None
-    for _ in range(retries):
+    for i in range(retries):
         try:
             return fn()
         except Exception as e:
             last_err = e
-            time.sleep(delay)
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status is None and "429" in str(e):
+                status = 429
+            sleep_s = delay * (backoff ** i) + random.uniform(0, jitter)
+            time.sleep(sleep_s if status == 429 else delay)
     if last_err:
         raise last_err
 
 def safe_worksheet(sh, name: str):
     if not sh:
         raise ValueError(f"Spreadsheet object is not valid. Cannot get worksheet '{name}'.")
-    try:
-        return with_retry(lambda: sh.worksheet(name))
-    except WorksheetNotFound:
-        raise
+    key = _ws_cache_key(sh, name)
+    if key in _WS_CACHE:
+        return _WS_CACHE[key]
+    ws = with_retry(lambda: sh.worksheet(name))
+    _WS_CACHE[key] = ws
+    return ws
 
 # 문자열/헤더 정규화
 def norm(s: str) -> str:
@@ -127,13 +150,13 @@ def header_key(s: str) -> str:
     """헤더 비교용: 영숫자+하이픈만 남김"""
     return re.sub(r"[^a-z0-9\-]+", "", norm(s))
 
-def hex_to_rgb01(hex_str: str) -> Dict[str,float]:
+def hex_to_rgb01(hex_str: str) -> Dict[str, float]:
     """#RRGGBB → {red,green,blue} (0~1 float)"""
     hex_str = hex_str.lstrip("#")
     if len(hex_str) != 6:
-        return {"red":1,"green":1,"blue":0.7}
-    r,g,b = tuple(int(hex_str[i:i+2],16) for i in (0,2,4))
-    return {"red":r/255.0,"green":g/255.0,"blue":b/255.0}
+        return {"red": 1, "green": 1, "blue": 0.7}
+    r, g, b = tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+    return {"red": r / 255.0, "green": g / 255.0, "blue": b / 255.0}
 
 def extract_sheet_id(s: str) -> str | None:
     s = (s or "").strip()
@@ -160,14 +183,13 @@ def top_of_category(cat: str) -> Optional[str]:
     tail = strip_category_id(cat)
     for sep in ["/", ">", "|", "\\"]:
         if sep in tail:
-            tail = tail.split(sep,1)[0]
+            tail = tail.split(sep, 1)[0]
             break
     tail = tail.strip()
     return tail.lower() if tail else None
 
 def get_tem_sheet_name() -> str:
     return get_env("TEM_OUTPUT_SHEET_NAME", "TEM_OUTPUT")
-
 
 # =============================
 # Google Sheets 인증/열기
@@ -180,7 +202,6 @@ def _authorize_gspread_via_service_account():
         return None
     if "gcp_service_account" not in st.secrets:
         return None
-
     sa_info = dict(st.secrets["gcp_service_account"])
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -197,22 +218,20 @@ def _authorize_gspread_via_local_oauth():
     if cred_path.exists():
         return gspread.oauth(
             credentials_filename=str(cred_path),
-            authorized_user_filename=str(token_path)
+            authorized_user_filename=str(token_path),
         )
     return None
 
 def _get_ss_id_from_secrets_or_env(*keys: str) -> str:
     """
     Secrets → ENV 순서로 여러 키 이름(alias)을 검색하여 첫 값을 반환.
-    예) _get_ss_id_from_secrets_or_env("REFERENCE_SPREADSHEET_ID","REFERENCE_SHEET_KEY")
+    예) _get_ss_id_from_secrets_or_env("REFERENCE_SPREADSHEET_ID", "REFERENCE_SHEET_KEY")
     """
-    # Secrets 우선
-    for k in keys:
+    for k in keys:  # Secrets 우선
         val = _get_from_secrets(k)
         if val:
             return val
-    # 없으면 ENV
-    for k in keys:
+    for k in keys:  # 없으면 ENV
         val = os.getenv(k, "").strip()
         if val:
             return val
@@ -227,7 +246,6 @@ def open_sheet_by_env():
     ss_id = _get_ss_id_from_secrets_or_env("GOOGLE_SHEETS_SPREADSHEET_ID", "GOOGLE_SHEET_KEY")
     if not ss_id:
         raise RuntimeError("GOOGLE_SHEETS_SPREADSHEET_ID (or GOOGLE_SHEET_KEY) not set in secrets/env.")
-
     gc = _authorize_gspread_via_service_account() or _authorize_gspread_via_local_oauth()
     if gc is None:
         raise RuntimeError("No valid Google credentials. Set Streamlit secrets or place client_secret.json for local OAuth.")
@@ -242,7 +260,6 @@ def open_ref_by_env():
     ref_id = _get_ss_id_from_secrets_or_env("REFERENCE_SPREADSHEET_ID", "REFERENCE_SHEET_KEY")
     if not ref_id:
         return None
-
     gc = _authorize_gspread_via_service_account() or _authorize_gspread_via_local_oauth()
     if gc is None:
         raise RuntimeError("No valid Google credentials for reference sheet.")

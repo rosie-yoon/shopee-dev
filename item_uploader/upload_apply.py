@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-import os
 from io import BytesIO
 from typing import List, Optional
 
@@ -16,7 +15,6 @@ from .utils_common import open_sheet_by_env, safe_worksheet, with_retry, get_env
 
 # ------------------------------------------------------
 # 0) XLSX Sanitize: sheetViews / pane 제거 (네임스페이스 포함)
-#    - Shopee 원본 Pane/Freeze 이슈로 openpyxl가 범위를 오인하는 경우 방지
 # ------------------------------------------------------
 def _sanitize_xlsx_remove_sheetviews(bio: BytesIO) -> BytesIO:
     """
@@ -29,16 +27,9 @@ def _sanitize_xlsx_remove_sheetviews(bio: BytesIO) -> BytesIO:
     ob = BytesIO()
     modified = False
 
-    # 네임스페이스가 달라도 매칭되도록 처리
-    re_sheetviews_block = re.compile(
-        r"<(?:\w+:)?sheetViews[\s\S]*?</(?:\w+:)?sheetViews>",
-        re.IGNORECASE,
-    )
+    re_sheetviews_block = re.compile(r"<(?:\w+:)?sheetViews[\s\S]*?</(?:\w+:)?sheetViews>", re.IGNORECASE)
     re_pane_self = re.compile(r"<(?:\w+:)?pane\b[^>]*/>", re.IGNORECASE)
-    re_pane_block = re.compile(
-        r"<(?:\w+:)?pane\b[^>]*>[\s\S]*?</(?:\w+:)?pane>",
-        re.IGNORECASE,
-    )
+    re_pane_block = re.compile(r"<(?:\w+:)?pane\b[^>]*>[\s\S]*?</(?:\w+:)?pane>", re.IGNORECASE)
 
     with _ZipFile(ib, "r") as zin, _ZipFile(ob, "w") as zout:
         for info in zin.infolist():
@@ -59,34 +50,25 @@ def _sanitize_xlsx_remove_sheetviews(bio: BytesIO) -> BytesIO:
     return BytesIO(raw)
 
 # ------------------------------------------------------
-# 1) 보이는 행 우선(openpyxl) 파서
-#    - 결과가 1x1/비정상일 때는 pandas 폴백으로 자동 대체
-#    - 숨김 행: rd.hidden, height==0, outlineLevel+hidden 까지 배제
+# 1) 보이는 행(openpyxl) 우선 파서 + 숨김/높이0/아웃라인 숨김 제외
 # ------------------------------------------------------
 def _is_row_hidden_extended(ws, r_idx: int) -> bool:
     rd = ws.row_dimensions.get(r_idx)
     if not rd:
         return False
-    # 수동 숨김
     if getattr(rd, "hidden", False):
         return True
-    # 높이 0
     if getattr(rd, "height", None) == 0:
         return True
-    # 아웃라인(그룹) + 숨김(접힘)
     if getattr(rd, "outlineLevel", 0) > 0 and getattr(rd, "hidden", False):
         return True
     return False
 
 def _read_with_openpyxl_visible_only(file_bytes: bytes) -> List[List[str]]:
-    """
-    openpyxl로 '보이는 행'만 읽는다. (열 숨김은 값 유지)
-    오른쪽/아래쪽 연속 공백을 정리하여 2D 배열 균일화.
-    """
     from openpyxl import load_workbook
 
     wb = load_workbook(BytesIO(file_bytes), data_only=True, read_only=True, keep_links=False)
-    # 데이터가 가장 많은 시트를 선택 (BASIC/MEDIA/SALES 중 어떤 시트가 와도 안정)
+    # 데이터가 가장 많은 시트를 선택
     target = max(wb.worksheets, key=lambda s: (s.max_row or 0) * (s.max_column or 0))
 
     max_r = target.max_row or 0
@@ -103,28 +85,25 @@ def _read_with_openpyxl_visible_only(file_bytes: bytes) -> List[List[str]]:
             continue  # 숨김 행 제외
 
         arr = [("" if v is None else str(v).strip()) for v in (row or ())]
-        # 오른쪽 빈 셀 정리
         while arr and arr[-1] == "":
             arr.pop()
-        # 완전 공백 행 제거
         if any(arr):
             rows.append(arr)
 
-    # 우측 길이 맞추기
     max_len = max((len(r) for r in rows), default=0)
     rows = [r + [""] * (max_len - len(r)) for r in rows]
     return rows
 
 # ------------------------------------------------------
-# 2) pandas 폴백: 전체 행 읽기 (숨김 무시) → 1x1 재발 방지
-#   - 필터로 가려진 행은 파일 자체에서 판단 불가 → 필요 시 원본에서 필터 해제 후 업로드 안내
+# 2) pandas 폴백: 전체 행 읽기 (FutureWarning 제거 버전)
 # ------------------------------------------------------
 def _read_with_pandas_all_rows(file_bytes: bytes) -> List[List[str]]:
     try:
         df = pd.read_excel(BytesIO(file_bytes), engine="openpyxl", header=None, dtype=str)
     except Exception:
         return []
-    df = df.applymap(lambda x: "" if pd.isna(x) else str(x).strip())
+    # applymap → Series.map(경고 제거)
+    df = df.apply(lambda s: s.map(lambda x: "" if pd.isna(x) else str(x).strip()))
 
     # 오른쪽 빈 열 / 아래쪽 빈 행 제거
     while df.shape[1] > 0 and (df.iloc[:, -1] == "").all():
@@ -136,8 +115,6 @@ def _read_with_pandas_all_rows(file_bytes: bytes) -> List[List[str]]:
 
 # ------------------------------------------------------
 # 3) Shopee 상단 라벨/메타 행 제거
-#    - 라벨행: et_title_* / ps_* 류가 대부분인 행
-#    - 메타행: basic_info / media_info / sales_info, 또는 {"search_condition":{}} 포함
 # ------------------------------------------------------
 def _strip_shopee_meta_rows(values: list[list[str]]) -> list[list[str]]:
     if not values:
@@ -164,10 +141,8 @@ def _strip_shopee_meta_rows(values: list[list[str]]) -> list[list[str]]:
         return ratio >= 0.6
 
     v = values[:]
-    # 선두 라벨 행 제거 (여러 줄 가능)
     while v and is_label_row(v[0]):
         v = v[1:]
-    # 선두 메타 행 제거 (1~2번째 줄 확인)
     if v and is_meta_row(v[0]):
         v = v[1:]
     elif len(v) >= 2 and is_meta_row(v[1]):
@@ -175,7 +150,7 @@ def _strip_shopee_meta_rows(values: list[list[str]]) -> list[list[str]]:
     return v
 
 # ------------------------------------------------------
-# 4) 최종 파서: 1) sanitize → 2) 보이는 행 우선 → 3) 1x1 시 pandas 폴백 → 4) 라벨/메타 제거
+# 4) 최종 파서
 # ------------------------------------------------------
 def read_xlsx_values(bio: BytesIO) -> List[List[str]]:
     sanitized = _sanitize_xlsx_remove_sheetviews(bio)
@@ -198,7 +173,6 @@ def read_xlsx_values(bio: BytesIO) -> List[List[str]]:
 
 # ------------------------------------------------------
 # 5) Google Sheet 쓰기 (RAW + 청크)
-#    - UPLOAD_CHUNK_ROWS: Secrets/.env 모두 지원(get_env)
 # ------------------------------------------------------
 def _write_values_to_sheet(sh: gspread.Spreadsheet, tab: str, values: List[List], logs: List[str]) -> None:
     rows = len(values)
