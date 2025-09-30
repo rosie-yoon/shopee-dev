@@ -40,21 +40,34 @@ def load_env():
             return
     load_dotenv(override=True)  # fallback
 
+def _get_from_secrets(name: str) -> str:
+    if st is not None and hasattr(st, "secrets"):
+        try:
+            val = st.secrets.get(name, "")
+            return (str(val) if val is not None else "").strip()
+        except Exception:
+            return ""
+    return ""
+
 def get_env(name: str, default: str = "") -> str:
+    """Cloud에선 Secrets 우선 → 없으면 OS/.env"""
+    val = _get_from_secrets(name)
+    if val:
+        return val
     return os.getenv(name, default).strip()
 
 def get_bool_env(name: str, default: bool=False) -> bool:
-    val = os.getenv(name, "").strip().lower()
-    if val in ["1","true","yes","y"]: return True
-    if val in ["0","false","no","n"]: return False
+    v = _get_from_secrets(name).lower()
+    if not v:
+        v = os.getenv(name, "").strip().lower()
+    if v in ["1","true","yes","y"]: return True
+    if v in ["0","false","no","n"]: return False
     return default
 
 def _env_path() -> str:
     here = Path(__file__).resolve().parent
     p1 = here / ".env"
-    if p1.exists():
-        return str(p1)
-    return str(Path.cwd() / ".env")
+    return str(p1 if p1.exists() else Path.cwd() / ".env")
 
 def save_env_value(key: str, value: str):
     """단순 .env 업데이트: 키 있으면 교체, 없으면 추가 (로컬에서만 사용)"""
@@ -188,48 +201,49 @@ def _authorize_gspread_via_local_oauth():
         )
     return None
 
-def _get_ss_id_from_secrets_or_env(key: str) -> str:
-    """Secrets → ENV 순으로 ID 조회"""
-    ssid = ""
-    if st and hasattr(st, "secrets"):
-        ssid = st.secrets.get(key, "")
-    if not ssid:
-        ssid = get_env(key, "")
-    return ssid
+def _get_ss_id_from_secrets_or_env(*keys: str) -> str:
+    """
+    Secrets → ENV 순서로 여러 키 이름(alias)을 검색하여 첫 값을 반환.
+    예) _get_ss_id_from_secrets_or_env("REFERENCE_SPREADSHEET_ID","REFERENCE_SHEET_KEY")
+    """
+    # Secrets 우선
+    for k in keys:
+        val = _get_from_secrets(k)
+        if val:
+            return val
+    # 없으면 ENV
+    for k in keys:
+        val = os.getenv(k, "").strip()
+        if val:
+            return val
+    return ""
 
 def open_sheet_by_env():
     """
-    Google Sheet 열기
-    우선순위:
-      1) Streamlit Secrets의 서비스계정 인증
-      2) (없으면) 로컬 OAuth 파일(client_secret.json/token.json) fallback
+    본 작업 대상 Sheet 열기.
+    허용 키: GOOGLE_SHEETS_SPREADSHEET_ID (권장), GOOGLE_SHEET_KEY (별칭)
     """
-    load_env()  # 로컬 ENV 대비
-    ss_id = _get_ss_id_from_secrets_or_env("GOOGLE_SHEETS_SPREADSHEET_ID")
+    load_env()
+    ss_id = _get_ss_id_from_secrets_or_env("GOOGLE_SHEETS_SPREADSHEET_ID", "GOOGLE_SHEET_KEY")
     if not ss_id:
-        raise RuntimeError("GOOGLE_SHEETS_SPREADSHEET_ID not set in secrets/env.")
+        raise RuntimeError("GOOGLE_SHEETS_SPREADSHEET_ID (or GOOGLE_SHEET_KEY) not set in secrets/env.")
 
-    gc = _authorize_gspread_via_service_account()
-    if gc is None:
-        gc = _authorize_gspread_via_local_oauth()
+    gc = _authorize_gspread_via_service_account() or _authorize_gspread_via_local_oauth()
     if gc is None:
         raise RuntimeError("No valid Google credentials. Set Streamlit secrets or place client_secret.json for local OAuth.")
-
     return gc.open_by_key(ss_id)
 
 def open_ref_by_env():
     """
     Reference Sheet 열기 (선택적)
+    허용 키: REFERENCE_SPREADSHEET_ID (권장), REFERENCE_SHEET_KEY (별칭)
     """
     load_env()
-    ref_id = _get_ss_id_from_secrets_or_env("REFERENCE_SPREADSHEET_ID")
+    ref_id = _get_ss_id_from_secrets_or_env("REFERENCE_SPREADSHEET_ID", "REFERENCE_SHEET_KEY")
     if not ref_id:
         return None
 
-    gc = _authorize_gspread_via_service_account()
-    if gc is None:
-        gc = _authorize_gspread_via_local_oauth()
+    gc = _authorize_gspread_via_service_account() or _authorize_gspread_via_local_oauth()
     if gc is None:
         raise RuntimeError("No valid Google credentials for reference sheet.")
-
     return gc.open_by_key(ref_id)
