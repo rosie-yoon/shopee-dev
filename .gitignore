@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.log
+
+# Virtual env
+.venv/
+venv/
+ENV/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Local data / outputs
+logs/
+data/
+*.xlsx
+token.json
+client_secret.json
+
+# OS & editor
+.DS_Store
+.idea/
+.vscode/

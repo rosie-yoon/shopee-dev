@@ -1,0 +1,19 @@
+# Streamlit
+streamlit>=1.33,<1.39
+
+# 이미지/데이터
+pillow
+pandas
+numpy
+requests
+openpyxl
+python-dotenv>=1.0
+
+# Google Sheets/Auth
+gspread>=5.12,<6
+google-auth>=2.29,<3
+google-auth-oauthlib>=1.2,<2
+
+# 필요 시(대안 경로로 Google API 클라이언트 직접 쓸 때만)
+# google-api-python-client>=2.129,<3
+# google-auth-httplib2>=0.2,<1
