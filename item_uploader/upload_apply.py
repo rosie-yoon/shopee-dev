@@ -1,21 +1,18 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import os
 import re
+import os
 from io import BytesIO
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import gspread
 from gspread.utils import rowcol_to_a1
-
-# 프로젝트 공통 유틸
-from .utils_common import open_sheet_by_env, safe_worksheet, with_retry
-
-# 파서에서 사용
 import pandas as pd
 from zipfile import ZipFile as _ZipFile
 
+# 프로젝트 공통 유틸
+from .utils_common import open_sheet_by_env, safe_worksheet, with_retry, get_env
 
 # ------------------------------------------------------
 # 0) XLSX Sanitize: sheetViews / pane 제거 (네임스페이스 포함)
@@ -61,14 +58,25 @@ def _sanitize_xlsx_remove_sheetviews(bio: BytesIO) -> BytesIO:
         return ob
     return BytesIO(raw)
 
-
 # ------------------------------------------------------
 # 1) 보이는 행 우선(openpyxl) 파서
 #    - 결과가 1x1/비정상일 때는 pandas 폴백으로 자동 대체
+#    - 숨김 행: rd.hidden, height==0, outlineLevel+hidden 까지 배제
 # ------------------------------------------------------
-def _is_row_hidden(ws, r_idx: int) -> bool:
+def _is_row_hidden_extended(ws, r_idx: int) -> bool:
     rd = ws.row_dimensions.get(r_idx)
-    return bool(rd and rd.hidden)   # None이면 보이는 행
+    if not rd:
+        return False
+    # 수동 숨김
+    if getattr(rd, "hidden", False):
+        return True
+    # 높이 0
+    if getattr(rd, "height", None) == 0:
+        return True
+    # 아웃라인(그룹) + 숨김(접힘)
+    if getattr(rd, "outlineLevel", 0) > 0 and getattr(rd, "hidden", False):
+        return True
+    return False
 
 def _read_with_openpyxl_visible_only(file_bytes: bytes) -> List[List[str]]:
     """
@@ -78,7 +86,7 @@ def _read_with_openpyxl_visible_only(file_bytes: bytes) -> List[List[str]]:
     from openpyxl import load_workbook
 
     wb = load_workbook(BytesIO(file_bytes), data_only=True, read_only=True, keep_links=False)
-    # 데이터가 가장 많은 시트를 선택 (필요시 wb.worksheets[0]으로 고정 가능)
+    # 데이터가 가장 많은 시트를 선택 (BASIC/MEDIA/SALES 중 어떤 시트가 와도 안정)
     target = max(wb.worksheets, key=lambda s: (s.max_row or 0) * (s.max_column or 0))
 
     max_r = target.max_row or 0
@@ -91,54 +99,47 @@ def _read_with_openpyxl_visible_only(file_bytes: bytes) -> List[List[str]]:
         target.iter_rows(min_row=1, max_row=max_r, min_col=1, max_col=max_c, values_only=True),
         start=1,
     ):
-        if _is_row_hidden(target, r_idx):
+        if _is_row_hidden_extended(target, r_idx):
             continue  # 숨김 행 제외
 
         arr = [("" if v is None else str(v).strip()) for v in (row or ())]
-        while arr and arr[-1] == "":  # 오른쪽 공백 제거
+        # 오른쪽 빈 셀 정리
+        while arr and arr[-1] == "":
             arr.pop()
+        # 완전 공백 행 제거
         if any(arr):
             rows.append(arr)
 
+    # 우측 길이 맞추기
     max_len = max((len(r) for r in rows), default=0)
     rows = [r + [""] * (max_len - len(r)) for r in rows]
     return rows
 
-
 # ------------------------------------------------------
 # 2) pandas 폴백: 전체 행 읽기 (숨김 무시) → 1x1 재발 방지
+#   - 필터로 가려진 행은 파일 자체에서 판단 불가 → 필요 시 원본에서 필터 해제 후 업로드 안내
 # ------------------------------------------------------
 def _read_with_pandas_all_rows(file_bytes: bytes) -> List[List[str]]:
-    """
-    pandas로 전체 행을 읽어 최소한의 데이터 손실을 방지한다.
-    오른쪽/아래쪽 연속 공백 행/열을 제거해 배열 정리.
-    """
     try:
         df = pd.read_excel(BytesIO(file_bytes), engine="openpyxl", header=None, dtype=str)
     except Exception:
         return []
     df = df.applymap(lambda x: "" if pd.isna(x) else str(x).strip())
 
-    while df.shape[1] > 0 and (df.iloc[:, -1] == "").all():  # 오른쪽 빈 열 제거
+    # 오른쪽 빈 열 / 아래쪽 빈 행 제거
+    while df.shape[1] > 0 and (df.iloc[:, -1] == "").all():
         df = df.iloc[:, :-1]
-    while df.shape[0] > 0 and (df.iloc[-1, :] == "").all():  # 아래쪽 빈 행 제거
+    while df.shape[0] > 0 and (df.iloc[-1, :] == "").all():
         df = df.iloc[:-1, :]
 
     return df.values.tolist()
 
-
 # ------------------------------------------------------
 # 3) Shopee 상단 라벨/메타 행 제거
-#    - 라벨행: et_title_* 로만 구성된 첫 행
-#    - 메타행: basic_info/media_info/sales_info + {"search_condition":{}} 포함
+#    - 라벨행: et_title_* / ps_* 류가 대부분인 행
+#    - 메타행: basic_info / media_info / sales_info, 또는 {"search_condition":{}} 포함
 # ------------------------------------------------------
 def _strip_shopee_meta_rows(values: list[list[str]]) -> list[list[str]]:
-    """
-    Shopee 상단 라벨/메타 행 제거
-      - 라벨행: et_title_* / ps_* 류의 '머신 라벨'이 대부분인 행
-      - 메타행: basic_info / media_info / sales_info 또는 {"search_condition":{}}가 있는 행
-    주의: '사람이 읽는 헤더'(Product ID, Category, Cover image...)는 보존
-    """
     if not values:
         return values
 
@@ -152,7 +153,6 @@ def _strip_shopee_meta_rows(values: list[list[str]]) -> list[list[str]]:
             return True
         return any("search_condition" in c.lower() for c in r if c)
 
-    # 라벨 토큰 판단: et_title_*, ps_*, ps_item_image.N, option_... 등
     label_pat = re.compile(r"^(et_title_|ps_)", re.IGNORECASE)
 
     def is_label_row(row: list[str]) -> bool:
@@ -161,35 +161,23 @@ def _strip_shopee_meta_rows(values: list[list[str]]) -> list[list[str]]:
             return False
         label_like = sum(1 for c in r if label_pat.match(c) or "ps_item_image" in c or "option_" in c or "option." in c)
         ratio = label_like / max(1, len(r))
-        # 라벨 성격이 강하면(60% 이상) 라벨 행으로 간주
         return ratio >= 0.6
 
     v = values[:]
-
-    # --- 1) 선두 라벨 행 제거 (여러 줄 연속일 가능성까지 while로 처리) ---
+    # 선두 라벨 행 제거 (여러 줄 가능)
     while v and is_label_row(v[0]):
         v = v[1:]
-
-    # --- 2) 선두 메타 행 제거 (1~2번째 줄에서 탐지) ---
+    # 선두 메타 행 제거 (1~2번째 줄 확인)
     if v and is_meta_row(v[0]):
         v = v[1:]
     elif len(v) >= 2 and is_meta_row(v[1]):
         v = [v[0]] + v[2:]
-
     return v
-
-
 
 # ------------------------------------------------------
 # 4) 최종 파서: 1) sanitize → 2) 보이는 행 우선 → 3) 1x1 시 pandas 폴백 → 4) 라벨/메타 제거
 # ------------------------------------------------------
 def read_xlsx_values(bio: BytesIO) -> List[List[str]]:
-    """
-    업로드된 XLSX BytesIO → 2D values
-      - sheetViews/pane 제거(안정화)
-      - 보이는 행 우선(openpyxl) → 1x1/비정상 시 pandas 폴백
-      - Shopee 라벨/메타 행 제거
-    """
     sanitized = _sanitize_xlsx_remove_sheetviews(bio)
     sanitized.seek(0)
     raw_bytes = sanitized.read()
@@ -208,10 +196,9 @@ def read_xlsx_values(bio: BytesIO) -> List[List[str]]:
     vis = _strip_shopee_meta_rows(vis)
     return vis
 
-
 # ------------------------------------------------------
 # 5) Google Sheet 쓰기 (RAW + 청크)
-#    - .env: UPLOAD_CHUNK_ROWS (0이면 한 번에)
+#    - UPLOAD_CHUNK_ROWS: Secrets/.env 모두 지원(get_env)
 # ------------------------------------------------------
 def _write_values_to_sheet(sh: gspread.Spreadsheet, tab: str, values: List[List], logs: List[str]) -> None:
     rows = len(values)
@@ -231,12 +218,11 @@ def _write_values_to_sheet(sh: gspread.Spreadsheet, tab: str, values: List[List]
     if ws.row_count < rows or ws.col_count < cols:
         with_retry(lambda: ws.resize(rows=rows + 10, cols=cols + 5))
 
-    chunk_rows = int(os.getenv("UPLOAD_CHUNK_ROWS", "0") or "0")
-    if chunk_rows and chunk_rows > 0:
+    chunk_rows = int(get_env("UPLOAD_CHUNK_ROWS", "0") or "0")
+    if chunk_rows > 0:
         start = 0
         while start < rows:
             end = min(rows, start + chunk_rows)
-            # ★★★ (수정) 끝 주소를 계산하지 않고 시작 주소만 넘겨서 gspread가 자동으로 처리하도록 변경
             start_a1 = rowcol_to_a1(start + 1, 1)
             with_retry(lambda: ws.update(start_a1, values[start:end], raw=True))
             start = end
@@ -245,7 +231,6 @@ def _write_values_to_sheet(sh: gspread.Spreadsheet, tab: str, values: List[List]
         with_retry(lambda: ws.update(f"A1:{end_a1}", values, raw=True))
 
     logs.append(f"[OK] {tab}: {rows}x{cols} 적용 완료")
-
 
 # ------------------------------------------------------
 # 6) 파일명 → 탭 자동 라우팅
@@ -256,7 +241,6 @@ def _target_tab(filename: str) -> Optional[str]:
     if "media" in low: return "MEDIA"
     if "sales" in low: return "SALES"
     return None
-
 
 # ------------------------------------------------------
 # 7) 업로드 반영 엔트리
@@ -296,7 +280,6 @@ def apply_uploaded_files(files: dict[str, BytesIO]) -> list[str]:
     if not any(x.startswith("[OK]") for x in logs):
         logs.append("[WARN] 적용된 탭이 없습니다. 파일명 규칙/시트 권한을 확인하세요.")
     return logs
-
 
 # ------------------------------------------------------
 # 8) Streamlit 업로더용 수집기 (여러 XLSX 동시)

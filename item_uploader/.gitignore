@@ -5,3 +5,4 @@ tem-uploader/.env
 tem-uploader/service_account.json
 logs/
 data/
+.env
