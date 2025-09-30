@@ -17,3 +17,5 @@ google-auth-oauthlib>=1.2,<2
 # 필요 시(대안 경로로 Google API 클라이언트 직접 쓸 때만)
 # google-api-python-client>=2.129,<3
 # google-auth-httplib2>=0.2,<1
+
+XlsxWriter>=3.2,<4
