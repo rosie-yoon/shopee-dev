@@ -685,48 +685,103 @@ def run_step_6(sh: gspread.Spreadsheet, shop_code: str):
 
 
 # ==============================================================================
-# STEP 7: 최종 템플릿 분할 & 다운로드
+# STEP 7: 최종 템플릿 분할 & 다운로드 (헤더 유지)
 # ==============================================================================
 def run_step_7(sh: gspread.Spreadsheet):
-    """Step 7: TEM_OUTPUT을 TopLevel Category 단위로 분할하여 엑셀 파일 생성"""
-    print("\n[ Automation ] Starting Step 7: Generating final template file...")
+    """Step 7: TEM_OUTPUT을 TopLevel Category 단위로 분할하여 '헤더를 유지'한 엑셀 생성"""
+    print("\n[ Automation ] Starting Step 7: Generating final template file (keep headers)...")
+
     tem_name = get_tem_sheet_name()
     tem_ws = safe_worksheet(sh, tem_name)
-    
-    all_data = with_retry(lambda: tem_ws.get_values())
 
+    # TEM_OUTPUT 전체를 한 번만 읽음 (Read 요청 최소화)
+    all_data = with_retry(lambda: tem_ws.get_all_values())
     if not all_data:
         print("[!] TEM_OUTPUT sheet is empty. Cannot generate file.")
         return None
 
     df = pd.DataFrame(all_data)
-    
-    header_indices = df[df[1].str.lower() == 'category'].index
-    
-    if header_indices.empty:
+    # 문자열화(헤더 탐지에 .str 사용 가능하게)
+    for c in df.columns:
+        df[c] = df[c].astype(str)
+
+    # 헤더 행 탐지: 두 번째 컬럼(인덱스 1)이 'category' 인 행
+    header_mask = df.iloc[:, 1].str.lower().eq("category")
+    header_indices = df.index[header_mask].tolist()
+    if not header_indices:
         print("[!] No valid header rows found in TEM_OUTPUT.")
         return None
-        
+
     output = BytesIO()
-    # 엑셀 생성 엔진을 xlsxwriter로 지정하여 성능 확보
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+
+    # 엑셀 생성 엔진 선택 (xlsxwriter 우선, 없으면 openpyxl)
+    try:
+        import xlsxwriter  # noqa: F401
+        engine = "xlsxwriter"
+    except Exception:
+        engine = "openpyxl"
+
+    with pd.ExcelWriter(output, engine=engine) as writer:
         for i, header_index in enumerate(header_indices):
+            # [헤더행+1, 다음 헤더행) 구간이 데이터
             start_row = header_index + 1
-            end_row = header_indices[i+1] if i + 1 < len(header_indices) else len(df)
-            
-            chunk_df = df.iloc[start_row:end_row]
-            if chunk_df.empty: continue
-            
-            first_cat = chunk_df.iloc[0, 1] if len(chunk_df.iloc[0]) > 1 else "UNKNOWN"
+            end_row = header_indices[i + 1] if i + 1 < len(header_indices) else len(df)
+            if start_row >= end_row:
+                continue  # 빈 구간
+
+            # ---- 헤더/데이터 구성 ----
+            # 기존 로직과 동일하게 "첫 번째 컬럼은 제외"하고 저장
+            header_row = df.iloc[header_index, 1:]               # 헤더(2열부터)
+            chunk_df = df.iloc[start_row:end_row, 1:].copy()     # 데이터(2열부터)
+
+            # 첫 번째 데이터 컬럼의 하이픈 공백 정규화 (기존 로직 유지)
+            if not chunk_df.empty:
+                first_col = chunk_df.columns[0]
+                chunk_df[first_col] = (
+                    chunk_df[first_col]
+                    .astype(str)
+                    .str.replace(r"\s*-\s*", "-", regex=True)
+                )
+
+            # 컬럼명 = 헤더 행 값
+            columns = header_row.astype(str).tolist()
+            # 길이 보정(이상치 방어)
+            if len(columns) != chunk_df.shape[1]:
+                if len(columns) < chunk_df.shape[1]:
+                    columns += [f"col_{k}" for k in range(len(columns), chunk_df.shape[1])]
+                else:
+                    columns = columns[: chunk_df.shape[1]]
+            chunk_df.columns = columns
+
+            # 시트명: 첫 행의 category에서 TopLevel 추출 (없으면 UNKNOWN)
+            cat_col_name = next((c for c in columns if c.lower() == "category"), None)
+            first_cat = str(chunk_df.iloc[0][cat_col_name]) if (cat_col_name and not chunk_df.empty) else "UNKNOWN"
             top_level_name = top_of_category(first_cat) or "UNKNOWN"
-            sheet_name = re.sub(r'[\s/\\*?:\[\]]', '_', top_level_name.title())[:31]
+            sheet_name = re.sub(r"[\s/\\*?:\[\]]", "_", str(top_level_name).title())[:31]
 
-            chunk_df = chunk_df.iloc[:, 1:]
+            # ---- 엑셀에 쓰기 (헤더 유지) ----
+            chunk_df.to_excel(writer, sheet_name=sheet_name, index=False)
 
-            chunk_df.iloc[:, 0] = chunk_df.iloc[:, 0].str.replace(r'\s*-\s*', '-', regex=True)
-
-            chunk_df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
+            # 편의 포맷(선택): 첫 행 프리즈 + 간단 오토폭
+            try:
+                ws = writer.sheets.get(sheet_name)
+                if ws:
+                    try:
+                        ws.freeze_panes(1, 0)
+                    except Exception:
+                        pass
+                    try:
+                        widths = [
+                            max(9, min(60, int(chunk_df[col].astype(str).map(len).max() or 0) + 2))
+                            for col in chunk_df.columns
+                        ]
+                        for col_idx, width in enumerate(widths):
+                            ws.set_column(col_idx, col_idx, width)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
     output.seek(0)
-    print("Step 7: Final template file generated successfully.")
+    print("Step 7: Final template file generated successfully (headers kept).")
     return output
