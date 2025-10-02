@@ -42,7 +42,7 @@ with st.sidebar:
         image_host = st.text_input(
             "Image Hosting URL",
             value=cur_host or "",
-            placeholder="예: https://dns.shopeecopy.com/"
+            placeholder="예: https://shopeecopy.com/COVER/"
         )
         submitted = st.form_submit_button("저장")
         if submitted:
