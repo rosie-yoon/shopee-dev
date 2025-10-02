@@ -1,5 +1,6 @@
+# item_uploader/app.py
 # -*- coding: utf-8 -*-
-"""ITEM UPLOADER Streamlit app (clean multipage version)."""
+"""ITEM UPLOADER Streamlit app (clean multipage version, without settings dialog)."""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ import streamlit as st
 
 # ---- 패키지 내부 모듈: 상대 임포트로 통일 ----
 from .utils_common import (
-    get_env, save_env_value, extract_sheet_id, sheet_link, load_env
+    get_env, load_env
 )
 from .upload_apply import collect_xlsx_files, apply_uploaded_files
 from .main_controller import ShopeeAutomation
@@ -58,72 +59,15 @@ h1, h2, h3, h5 { font-weight: 700; }
         unsafe_allow_html=True,
     )
 
-    # ---- 설정 다이얼로그 ----
-    @st.dialog("⚙️ 초기 설정")
-    def settings_dialog():
-        st.markdown("<h5>■ 샵 복제 시트 URL</h5>", unsafe_allow_html=True)
+    # ---- 메인 앱 ----
+    def main_application():
+        # 상단 가이드 (설정 다이얼로그 버튼 제거됨)
         st.markdown(
             """
-<div class="dialog-description">
-샵 복제 시트의 주소를 입력하세요.<br>
-시트가 없다면 <a href="https://docs.google.com/spreadsheets/d/1l5DK-1lNGHFPfl7mbI6sTR_qU1cwHg2-tlBXzY2JhbI/edit#gid=0" target="_blank">템플릿 시트</a>에서 사본을 생성하여 입력해주세요.
-</div>
+<p>아래 영역에 BASIC, MEDIA, SALES 엑셀 파일을 업로드하고 샵 코드를 입력한 후, 실행 버튼을 눌러주세요.</p>
 """,
             unsafe_allow_html=True,
         )
-
-        sheet_url = st.text_input(
-            "Google Sheets URL",
-            placeholder="https://docs.google.com/spreadsheets/d/...",
-            value=sheet_link(get_env("GOOGLE_SHEETS_SPREADSHEET_ID"))
-            if get_env("GOOGLE_SHEETS_SPREADSHEET_ID")
-            else "",
-            label_visibility="collapsed",
-        )
-
-        st.markdown("<h5>■ 이미지 호스팅 주소</h5>", unsafe_allow_html=True)
-        image_host = st.text_input(
-            "Image Hosting URL",
-            placeholder="예: https://dns.shopeecopy.com/",
-            value=get_env("IMAGE_HOSTING_URL"),
-            label_visibility="collapsed",
-        )
-
-        if st.button("저장"):
-            sheet_id = extract_sheet_id(sheet_url)
-            if not sheet_id:
-                st.error("올바른 Google Sheets URL을 입력해주세요.")
-            elif not image_host:
-                st.error("이미지 호스팅 주소를 입력해주세요.")
-            elif not image_host.startswith("http"):
-                st.error("주소는 'http://' 또는 'https://'로 시작해야 합니다.")
-            else:
-                save_env_value("GOOGLE_SHEETS_SPREADSHEET_ID", sheet_id)
-                save_env_value("IMAGE_HOSTING_URL", image_host)
-                st.success("설정이 저장되었습니다!")
-                st.rerun()
-
-    # ---- 메인 앱 ----
-    def main_application():
-        col1, col2 = st.columns([0.8, 0.2])
-        with col1:
-            st.markdown(
-                """
-<p>아래 영역에 BASIC, MEDIA, SALES 엑셀 파일을 업로드하고 샵 코드를 입력한 후, 실행 버튼을 눌러주세요.</p>
-""",
-                unsafe_allow_html=True,
-            )
-        with col2:
-            with st.container():
-                st.write(
-                    '<div style="display: flex; justify-content: flex-end; width: 100%;">',
-                    unsafe_allow_html=True,
-                )
-                if st.button("⚙️ 설정 변경", key="edit_settings"):
-                    settings_dialog()
-                st.write("</div>", unsafe_allow_html=True)
-
-        st.write("")
 
         # --- 입력 영역 ---
         st.subheader("1. 파일 및 샵 코드 입력")
@@ -219,11 +163,8 @@ h1, h2, h3, h5 { font-weight: 700; }
         else:
             st.info("자동화가 성공적으로 완료되면 여기에 다운로드 버튼이 나타납니다.")
 
-    # ---- 라우팅 ----
-    if not get_env("GOOGLE_SHEETS_SPREADSHEET_ID") or not get_env("IMAGE_HOSTING_URL"):
-        settings_dialog()
-    else:
-        main_application()
+    # 설정 다이얼로그/호출 제거 → 메인 앱만 실행
+    main_application()
 
 
 # 단독 실행 지원(브릿지 없이 app.py만 직접 실행 시)
