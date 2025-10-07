@@ -3,7 +3,6 @@ import streamlit as st
 
 __APP_VERSION__ = "v3"
 
-# 페이지 설정
 st.set_page_config(
     page_title="Shopee Support",
     page_icon="🌐",
@@ -11,7 +10,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---- 스타일
 st.markdown("""
 <style>
 :root{
@@ -51,18 +49,15 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---- 헤더
 st.title("🌐 Shopee Support Tools")
 st.info(
     "Cover Image : 썸네일로 사용할 커버 이미지를 생성하는 메뉴입니다.\n\n"
     "Copy Template : 샵 복제 시 사용할 Mass Upload 파일을 생성하는 메뉴입니다.\n\n"
-    "Create New Items : 신규 상품 업로드 템플릿을 생성하는 메뉴입니다."
+    "Create New Items : ‘상품등록’ 개인 시트를 기반으로 신규 아이템 업로드 템플릿을 생성합니다."
 )
 
 st.divider()
 
-# ---- 네비게이션
-# 1행: 기존 두 메뉴
 col1, col2 = st.columns(2)
 with col1:
     if hasattr(st, "switch_page"):
@@ -78,13 +73,11 @@ with col2:
     else:
         st.page_link("pages/2_Copy Template.py", label="Copy Template", use_container_width=True)
 
-# 2행: 신규 생성 메뉴
 st.divider()
 if hasattr(st, "switch_page"):
-    if st.button("New Item Template", use_container_width=True, key="btn_create"):
+    if st.button("🧩 Create New Items", use_container_width=True, key="btn_create"):
         st.switch_page("pages/3_Create Items.py")
 else:
-    st.page_link("pages/3_Create Items.py", label="New Item Template", use_container_width=True)
+    st.page_link("pages/3_Create Items.py", label="🧩 Create New Items", use_container_width=True)
 
-# ---- 푸터(버전)
 st.caption(f"Version: {__APP_VERSION__}")
