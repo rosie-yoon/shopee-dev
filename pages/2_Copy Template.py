@@ -23,8 +23,6 @@ from item_uploader.utils_common import (
 # 전역 테마 적용 (사이드바 노출, 컴포넌트 글래스)
 apply_theme(hide_sidebar=False, components_glass=True)
 
-# 타이틀 + 아이콘
-title_with_icon("Copy Template", "copy")
 
 # ==============================
 # 사이드바 설정 폼 (이 페이지 전용)
