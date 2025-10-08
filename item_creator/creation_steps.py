@@ -7,6 +7,7 @@ import io
 import csv
 import re
 from io import BytesIO
+from collections import defaultdict
 
 import gspread
 from gspread.cell import Cell
@@ -24,7 +25,9 @@ from utils_common import (
 )
 from .utils_common import get_env, join_url, forward_fill_by_group
 
-# _find_col_index 함수가 utils_common.py에 없으므로, 여기에 재정의합니다.
+
+# === automation_steps.py 공통 헬퍼 함수 이식 ===
+
 def _find_col_index(keys: List[str], name: str, extra_alias: List[str]=[]) -> int:
     """헤더 키 목록(keys=header_key 적용된 리스트)에서 name 또는 alias를 찾음"""
     tgt = header_key(name)
@@ -39,6 +42,26 @@ def _find_col_index(keys: List[str], name: str, extra_alias: List[str]=[]) -> in
             return i
     return -1
 
+# _pick_index_by_candidates (Weight 매핑을 위해 이식)
+def _pick_index_by_candidates(header_row: List[str], candidates: List[str]) -> int:
+    """헤더 행에서 후보명(정규화)으로 가장 그럴듯한 인덱스 찾기 (정확 > 부분 일치)"""
+    keys = [header_key(x) for x in header_row]
+    # 정확 일치
+    for cand in candidates:
+        ck = header_key(cand)
+        for i, k in enumerate(keys):
+            if k == ck:
+                return i
+    # 부분 일치
+    for cand in candidates:
+        ck = header_key(cand)
+        if not ck:
+            continue
+        for i, k in enumerate(keys):
+            if ck in k:
+                return i
+    return -1
+
 
 # (참고) 레퍼런스 시트에서 템플릿 헤더 사전 로딩
 def _load_template_dict(ref: gspread.Spreadsheet) -> Dict[str, List[str]]:
@@ -49,7 +72,7 @@ def _load_template_dict(ref: gspread.Spreadsheet) -> Dict[str, List[str]]:
     for r in vals[1:]:
         if not r or not (r[0] or "").strip():
             continue
-        out[header_key(r[0])] = [str(x or "").strip() for x in row[1:]]
+        out[header_key(r[0])] = [str(x or "").strip() for x in r[1:]]
     return out
 
 
@@ -190,22 +213,26 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet):
     print(f"C2 Done. Buckets: {len(buckets)}")
 
 
-# C3: FDA Registration No. 채우기 (새로 추가)
+# C3: FDA Registration No. 채우기 (STEP 3 이식)
 def run_step_C3_fda(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet, overwrite: bool = False):
-    print("\n[ Create ] Step C3: Fill FDA Code...")
+    """
+    (STEP 3 이식) Reference 시트의 목록을 기준으로, TEM_OUTPUT 행에 고정 FDA 코드를 채웁니다.
+    """
+    print("\n[ Create ] Step C3: Fill FDA Code (STEP 3)...")
     
     tem_name = get_tem_sheet_name()
-    # FDA 대상 카테고리 시트 이름 (automation_steps.py 참조)
     fda_sheet_name = get_env("FDA_CATEGORIES_SHEET_NAME", "TH Cos")
     fda_header = get_env("FDA_HEADER_NAME", "FDA Registration No.")
     FDA_CODE = "10-1-9999999"
 
     try:
+        # Reference 시트에서 FDA 대상 카테고리 목록 읽기
         fda_ws = safe_worksheet(ref, fda_sheet_name)
         fda_vals_2d = with_retry(lambda: fda_ws.get_values('A:A', value_render_option='UNFORMATTED_VALUE'))
+        # (automation_steps.py 원본 로직) 전체 경로를 소문자로 변환하여 비교
         target_categories = {str(r[0]).strip().lower() for r in (fda_vals_2d or []) if r and str(r[0]).strip()}
     except Exception as e:
-        print(f"[!] '{fda_sheet_name}' 탭을 읽는 데 실패했습니다: {e}. Step C3을 건너뜁니다.")
+        print(f"[!] '{fda_sheet_name}' 탭을 읽는 데 실패했습니다: {e}. Step C3을 건너<binary data, 2 bytes><binary data, 2 bytes><binary data, 2 bytes>니다.")
         return
 
     try:
@@ -223,6 +250,7 @@ def run_step_C3_fda(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet, overwrite
         if (row[1] if len(row) > 1 else "").strip().lower() == "category":
             current_keys = [header_key(h) for h in row[1:]]
             col_category_B = _find_col_index(current_keys, "category")
+            # header_key를 사용하여 FDA 헤더를 찾습니다.
             col_fda_B = _find_col_index(current_keys, fda_header)
             continue
         if not current_keys or col_fda_B < 0 or col_category_B < 0: continue
@@ -235,6 +263,7 @@ def run_step_C3_fda(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet, overwrite
         
         if category_val_normalized and category_val_normalized in target_categories:
             c_fda_sheet_col = col_fda_B + 2
+            # TEM_OUTPUT 행의 해당 열 값(FDA 필드)을 가져옵니다.
             cur_fda = (row[c_fda_sheet_col - 1] if len(row) >= c_fda_sheet_col else "").strip()
             
             if not cur_fda or overwrite:
@@ -264,9 +293,9 @@ def run_step_C5_images(
     pass
 
 
-# C6: Stock/Weight/Brand 보정 (Stock=1000, Brand=0, Weight=MARGIN 매핑)
+# C6: Stock/Weight/Brand 보정 (Weight 채우기 STEP 4 이식)
 def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet):
-    print("\n[ Create ] Step C6: Fill Stock, Weight, Brand ...")
+    print("\n[ Create ] Step C6: Fill Stock, Weight, Brand (Weight STEP 4)...")
     tem_name = get_tem_sheet_name()
     tem_ws = safe_worksheet(sh, tem_name)
     tem_vals = with_retry(lambda: tem_ws.get_all_values()) or []
@@ -281,11 +310,13 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet):
         mg_vals = with_retry(lambda: mg_ws.get_all_values()) or []
         if len(mg_vals) >= 2:
             mg_keys = [header_key(h) for h in mg_vals[0]]
-            idx_mg_sku = _find_col_index(mg_keys, "sku", extra_alias=["seller_sku"])
-            # [수정 반영] F열(header="weight" 또는 "f")을 명시적으로 참조
-            idx_mg_weight = _find_col_index(
-                mg_keys, "weight", extra_alias=["무게", "f", "package weight"] 
-            )
+            
+            # [STEP 4 이식 확인]: _pick_index_by_candidates 대신 _find_col_index를 사용하여
+            # automation_steps.py의 인덱스 후보를 적용
+            idx_mg_sku = _pick_index_by_candidates(mg_vals[0], ["sku", "seller_sku"]) 
+            # Weight 채우기 (automation_steps.py의 STEP 4와 동일한 후보)
+            idx_mg_weight = _pick_index_by_candidates(mg_vals[0], ["weight", "package weight"])
+
             if idx_mg_sku != -1 and idx_mg_weight != -1:
                 for r in range(1, len(mg_vals)):
                     row = mg_vals[r]
@@ -297,13 +328,14 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet):
         print("[C6] MARGIN 시트를 찾을 수 없습니다. Weight 매핑을 건너뜜.")
     except Exception as e:
         print(f"[C6] MARGIN 처리 중 오류: {e}. Weight 매핑 건너뜜.")
-
+        
+    # Brand 매핑 로직은 그대로 유지 (Brand=0 고정)
+    
     # 2) TEM에서 블록별 헤더 탐지 후 Stock, Weight, Brand, SKU 인덱스 찾아 채움
     updates: List[Cell] = []
     cur_headers = None
     idx_t_sku = idx_t_stock = idx_t_weight = idx_t_brand = -1
     
-    # ... (생략) Stock, Brand, Weight 매핑 로직 ...
     for r0, row in enumerate(tem_vals):
         if (row[1] if len(row) > 1 else "").strip().lower() == "category":
             cur_headers = [header_key(h) for h in row[1:]]
@@ -337,7 +369,6 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet):
                 cur = (row[idx_t_weight + 1] if len(row) > idx_t_weight + 1 else "").strip()
                 if cur != val:
                     updates.append(Cell(row=r0 + 1, col=idx_t_weight + 2, value=val))
-    # ... (생략)
 
     if updates:
         with_retry(lambda: tem_ws.update_cells(updates, value_input_option="RAW"))
@@ -346,13 +377,59 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet):
 
 
 class ShopeeCreator:
-    # ShopeeCreator 클래스 정의 (생략)
-    # ...
+    """
+    신규 상품 템플릿 생성 파이프라인 컨트롤러. (main_controller.py의 _ImplCreator)
+    """
+
+    def __init__(self, sheet_url: str, ref_url: Optional[str] = None) -> None:
+        if not sheet_url:
+            raise ValueError("sheet_url is required.")
+        self.sheet_url = sheet_url
+        self.ref_url = ref_url
+
+        self.gc: Optional[gspread.Client] = None
+        self.sh: Optional[gspread.Spreadsheet] = None
+        self.ref: Optional[gspread.Spreadsheet] = None
+        
+        # main_controller.py에서 주입되는 속성들
+        self.shop_code: Optional[str] = None
+        self.cover_base_url: Optional[str] = None
+        self.details_base_url: Optional[str] = None
+        self.option_base_url: Optional[str] = None
+
+
+    # ----------------------------------------------------------
+    # 내부 유틸
+    # ----------------------------------------------------------
+
+    def _connect(self) -> None:
+        """gspread 인증 및 대상/레퍼런스 스프레드시트 오픈"""
+        self.gc = authorize_gspread()
+        ss_id = extract_sheet_id(self.sheet_url)
+        if not ss_id:
+            raise ValueError("Invalid sheet_url: cannot extract spreadsheet ID.")
+        self.sh = with_retry(lambda: self.gc.open_by_key(ss_id))
+
+        if self.ref_url:
+            ref_id = extract_sheet_id(self.ref_url)
+            if ref_id:
+                try:
+                    self.ref = with_retry(lambda: self.gc.open_by_key(ref_id))
+                except Exception:
+                    self.ref = None
+            else:
+                self.ref = None
 
     def _reset_failures(self) -> None:
-        # _reset_failures 로직 (생략)
-        # ...
-        pass
+        """실행 시마다 Failures 시트를 초기화"""
+        assert self.sh is not None
+        try:
+            ws = safe_worksheet(self.sh, "Failures")
+            with_retry(lambda: ws.clear())
+        except WorksheetNotFound:
+            ws = with_retry(lambda: self.sh.add_worksheet(title="Failures", rows=1000, cols=10))
+        # [Failures 시트 초기화 요구사항 반영]: 헤더만 남기고 초기화
+        with_retry(lambda: ws.update(values=[["PID", "Category", "Name", "Reason", "Detail"]], range_name="A1"))
 
     # ----------------------------------------------------------
     # 실행
@@ -363,11 +440,13 @@ class ShopeeCreator:
           C1 → C2 → C3 (FDA) → C4 → C5 → C6
         """
         try:
-            # 인증 및 시트 연결 (생략)
-            # ...
+            # 인증 및 시트 연결
             self._connect()
             assert self.sh is not None
-            assert self.ref is not None
+            # C2, C3에서 ref를 사용하므로 assert
+            if not self.ref:
+                raise ValueError("Reference sheet URL is required or invalid.")
+
 
             # 실패 로그 초기화 (요구사항)
             self._reset_failures()
@@ -375,7 +454,7 @@ class ShopeeCreator:
             # 단계 실행: C3 (FDA) 추가
             run_step_C1(self.sh, self.ref)
             run_step_C2(self.sh, self.ref)
-            run_step_C3_fda(self.sh, self.ref) # [추가] FDA 코드 채우기
+            run_step_C3_fda(self.sh, self.ref) # [STEP 3 FDA 코드 채우기]
             run_step_C4_prices(self.sh)
             run_step_C5_images(
                 self.sh,
@@ -384,30 +463,38 @@ class ShopeeCreator:
                 details_base_url=self.details_base_url,
                 option_base_url=self.option_base_url,
             )
-            run_step_C6_stock_weight_brand(self.sh)
+            run_step_C6_stock_weight_brand(self.sh) # [STEP 4 Weight 채우기 포함]
 
             print("✅ 모든 단계 완료되었습니다.")
             return True
 
         except Exception as e:
-            # 오류 처리 로직 (생략)
-            # ...
+            # 오류 처리 로직
+            print(f"[ERROR] ShopeeCreator.run() 실패: {e}")
             import traceback
             traceback.print_exc()
             return False
 
 
     # ----------------------------------------------------------
-    # 엑셀 다운로드 (xlsx)
+    # 엑셀 다운로드 (xlsx) - STEP 7 이식
     # ----------------------------------------------------------
 
     def get_tem_values_xlsx(self) -> Optional[BytesIO]:
         """
-        [추가/수정] TEM_OUTPUT 시트를 엑셀(xlsx) 파일로 분할하여 반환합니다.
-        - A열 PID 제거, Category 형식 정규화 조건 반영.
+        [STEP 7 이식] TEM_OUTPUT 시트를 TopLevel Category 단위로 분할하여 엑셀(xlsx) 파일로 반환합니다.
+        - A열 PID 제거, Category 형식 정규화 조건 반영, 오토 포맷 적용.
         """
+        if not self.sh:
+             return None
+
         tem_name = get_tem_sheet_name()
-        tem_ws = safe_worksheet(self.sh, tem_name)
+        try:
+            tem_ws = safe_worksheet(self.sh, tem_name)
+        except WorksheetNotFound:
+            print(f"[!] {tem_name} 탭을 찾을 수 없습니다. 엑셀 생성을 건너뜁니다.")
+            return None
+
 
         all_data = with_retry(lambda: tem_ws.get_all_values())
         if not all_data:
@@ -428,12 +515,13 @@ class ShopeeCreator:
 
         output = BytesIO()
 
+        # 엑셀 생성 엔진 선택 (xlsxwriter 우선, 없으면 openpyxl)
         try:
-            import xlsxwriter # xlsxwriter가 있으면 xlsxwriter, 없으면 openpyxl 사용
+            import xlsxwriter  # noqa: F401
             engine = "xlsxwriter"
         except ImportError:
             try:
-                import openpyxl # openpyxl이 없으면 에러 발생
+                import openpyxl  # noqa: F401
                 engine = "openpyxl"
             except ImportError:
                 print("[!] 엑셀(xlsx) 생성을 위해 'xlsxwriter' 또는 'openpyxl' 라이브러리가 필요합니다. CSV로 폴백할 수 있습니다.")
@@ -453,34 +541,52 @@ class ShopeeCreator:
 
                 # 2. Category 의 코드와 하이픈 사이의 공백 제거 (첫 번째 컬럼 = Category)
                 if not chunk_df.empty and chunk_df.shape[1] > 0:
-                    first_col = chunk_df.columns[0]
-                    # 첫 번째 컬럼이 'Category'일 확률이 높지만, 안전하게 헤더를 확인
                     if header_key(header_row.iloc[0]) == "category":
-                        # as-is: 101643 - Beauty/Makeup/Lips/Lip Gloss
-                        # to-be: 101643-Beauty/Makeup/Lips/Lip Gloss
+                        # 정규화: 101643 - Beauty/ -> 101643-Beauty/
                         chunk_df.iloc[:, 0] = (
                             chunk_df.iloc[:, 0]
                             .astype(str)
                             .str.replace(r"\s*-\s*", "-", regex=True)
                         )
 
-                # 컬럼명 설정
+                # 컬럼명 설정 (automation_steps.py 로직 유지)
                 columns = header_row.astype(str).tolist()
                 if len(columns) != chunk_df.shape[1]:
-                    columns = columns[: chunk_df.shape[1]] if len(columns) > chunk_df.shape[1] else columns + [f"col_{k}" for k in range(len(columns), chunk_df.shape[1])]
+                    if len(columns) < chunk_df.shape[1]:
+                        columns += [f"col_{k}" for k in range(len(columns), chunk_df.shape[1])]
+                    else:
+                        columns = columns[: chunk_df.shape[1]]
                 chunk_df.columns = columns
 
-                # 시트명 결정
+                # 시트명 결정 (automation_steps.py 로직 유지)
                 cat_col_name = next((c for c in columns if c.lower() == "category"), None)
                 first_cat = str(chunk_df.iloc[0][cat_col_name]) if (cat_col_name and not chunk_df.empty) else "UNKNOWN"
                 top_level_name = top_of_category(first_cat) or "UNKNOWN"
                 sheet_name = re.sub(r"[\s/\\*?:\[\]]", "_", str(top_level_name).title())[:31]
 
-                # 엑셀에 쓰기 (헤더 유지, 인덱스 제거)
+                # 엑셀에 쓰기 (헤더 유지)
                 chunk_df.to_excel(writer, sheet_name=sheet_name, index=False)
 
-                # 편의 포맷 (생략)
-                # ...
+                # 편의 포맷: 첫 행 프리즈 + 간단 오토폭 (automation_steps.py 로직 이식)
+                try:
+                    ws = writer.sheets.get(sheet_name)
+                    if ws:
+                        try:
+                            ws.freeze_panes(1, 0) # 헤더 행 프리즈
+                        except Exception:
+                            pass
+                        try:
+                            # 컬럼 폭 자동 조절
+                            widths = [
+                                max(9, min(60, int(chunk_df[col].astype(str).map(len).max() or 0) + 2))
+                                for col in chunk_df.columns
+                            ]
+                            for col_idx, width in enumerate(widths):
+                                ws.set_column(col_idx, col_idx, width)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
         output.seek(0)
         print("Final template file generated successfully (xlsx).")
@@ -492,8 +598,7 @@ class ShopeeCreator:
 
     def get_tem_values_csv(self) -> Optional[bytes]:
         """TEM_OUTPUT 시트를 CSV 바이트로 반환 (PID 제거 및 Category 정규화는 XLSX에서 처리)"""
-        # main_controller.py가 CSV를 다운로드할 때 호출하는 메서드입니다.
-        # PID 제거 및 정규화는 XLSX 로직에 있으므로, CSV는 원본 데이터를 제공하는 폴백으로 남겨둡니다.
+        # CSV 폴백 로직은 PID 제거 및 Category 정규화 로직을 유지합니다. (자동 배포된 CSV 파일에 적용)
         if not self.sh:
             return None
 
@@ -503,8 +608,6 @@ class ShopeeCreator:
             if not vals:
                 return None
             
-            # [PID 제거] 엑셀 다운로드 조건에 따라 첫 번째 컬럼(PID)을 제거하고 CSV 생성 (폴백 CSV에도 적용)
-            # 또한, 헤더 행(두 번째 컬럼이 'Category'인 행)도 첫 번째 컬럼을 제거해야 합니다.
             processed_vals = []
             current_headers = None
             
@@ -520,6 +623,7 @@ class ShopeeCreator:
                     
                     # Category 형식 정규화 (PID 제거 후 첫 번째 열)
                     if len(data_row) > 0 and current_headers and header_key(current_headers[0]) == "category":
+                        # 정규화: 101643 - Beauty/ -> 101643-Beauty/
                         data_row[0] = re.sub(r"\s*-\s*", "-", data_row[0])
                         
                     processed_vals.append(data_row)
