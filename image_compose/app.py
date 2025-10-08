@@ -5,10 +5,9 @@ import io
 import zipfile
 
 import streamlit as st
-from PIL import Image as PILImage  # (중요) 전부 이 별칭으로 통일
+from PIL import Image as PILImage  # 별칭 통일
 
-# 상대 임포트: image_compose/composer_utils.py 가 같은 폴더에 있어야 합니다.
-# 패키지 인식을 위해 image_compose/__init__.py 도 반드시 존재해야 합니다.
+# 내부 유틸
 from .composer_utils import compose_one_bytes, SHADOW_PRESETS, has_useful_alpha, ensure_rgba
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -53,9 +52,8 @@ def _to_streamlit_image_input(x):
 
 
 def run():
-    # (주의) set_page_config는 래퍼(pages/1_Cover Image.py)에서 호출
+    # set_page_config는 페이지 래퍼에서 호출됨
     st.title("Cover Image")
-    # st.caption("build tag: cover-live-preview @ 16:xx KST")  # 필요시 버전 확인용
 
     # ---- 세션 상태 초기화 ----
     def init_state():
@@ -69,7 +67,11 @@ def run():
             "preview_list": [],        # bytes 리스트 (다중 미리보기)
             "preview_idx": 0,          # 다중 미리보기 인덱스
             "preview_sig": None,       # 현재 미리보기 입력/옵션의 시그니처 (라이브 갱신용)
-            "download_info": None,     # {"buffer": BytesIO, "count": int}
+            # 다운로드 다이얼로그 캐시
+            "dlg_zip_sig": None,
+            "dlg_zip_buf": None,
+            "dlg_zip_count": 0,
+            "dlg_zip_name": "Thumb_Craft_Results.zip",
         }
         for k, v in defaults.items():
             st.session_state.setdefault(k, v)
@@ -86,7 +88,6 @@ def run():
         for f in files:
             try:
                 name = getattr(f, "name", "noname")
-                # 일부 환경에서 UploadedFile에 size 속성이 없을 수 있음 → getbuffer().nbytes로 보완
                 try:
                     size = getattr(f, "size", None)
                 except Exception:
@@ -233,13 +234,10 @@ def run():
         zip_buf.seek(0)
         return zip_buf, count
 
-    # ---- 다운로드 다이얼로그 ----
+    # ---- 다운로드 다이얼로그 (샵코드 → 즉시 다운로드, 클릭 후 자동 닫기) ----
     @st.dialog("출력 설정")
     def show_save_dialog(item_files, template_files):
-        st.caption("설정 후 '다운로드'를 누르면 Zip 파일이 생성됩니다.")
-        fmt = "JPEG"   # 고정
-        quality = 100  # 고정
-        st.caption("저장 포맷: JPG(.jpg)")
+        st.caption("샵코드를 입력하고 ‘다운로드’를 누르면 Zip 파일이 저장됩니다.")
 
         shop_variable = st.text_input(
             "Shop 구분값 (선택)",
@@ -247,17 +245,47 @@ def run():
             help="입력 시 'Item_C_구분값.jpg' 형식으로 저장됩니다.",
         )
 
-        if st.button("다운로드", type="primary", use_container_width=True, key="btn_confirm_download"):
+        # zip 캐시 시그니처: 파일/옵션/샵코드
+        cur_sig = (
+            tuple(_files_fingerprint(item_files)),
+            tuple(_files_fingerprint(template_files)),
+            _options_signature(),
+            shop_variable or "",
+        )
 
-            with st.spinner("이미지를 생성 중입니다..."):
-                zip_buf, count = run_batch_composition(
-                    item_files, template_files, fmt, quality, shop_variable
-                )
-            if count > 0:
-                ss.download_info = {"buffer": zip_buf, "count": count}
-                st.rerun()  # 다운로드 버튼 반영 위해 1회만 재실행 (일상 상호작용의 깜빡임과 무관)
-            else:
+        need_build = (ss.get("dlg_zip_sig") != cur_sig)
+        if need_build:
+            if not item_files or not template_files:
+                st.warning("Item / Template 파일을 먼저 업로드해주세요.")
+                return
+            with st.spinner("Zip 패키지를 준비 중입니다..."):
+                fmt = "JPEG"
+                quality = 100
+                zip_buf, count = run_batch_composition(item_files, template_files, fmt, quality, shop_variable)
+            if count == 0:
                 st.warning("생성된 이미지가 없습니다. Item이 투명 배경을 가졌는지 확인해주세요.")
+                return
+            ss.dlg_zip_sig = cur_sig
+            ss.dlg_zip_buf = zip_buf
+            ss.dlg_zip_count = count
+            ss.dlg_zip_name = f"Thumb_Craft_Results_{shop_variable}.zip" if shop_variable else "Thumb_Craft_Results.zip"
+
+        st.success(f"총 {ss.get('dlg_zip_count', 0)}개의 이미지가 준비되었습니다.")
+
+        clicked = st.download_button(
+            "다운로드",
+            ss.dlg_zip_buf,
+            file_name=ss.get("dlg_zip_name", "Thumb_Craft_Results.zip"),
+            mime="application/zip",
+            use_container_width=True,
+            key="dl_zip_btn",
+        )
+        st.caption("※ 샵코드를 바꾸면 Zip이 자동으로 갱신됩니다.")
+
+        # 다운로드 클릭 시 자동 닫기
+        if clicked:
+            # 다이얼로그 밖에서 재호출되지 않으므로, rerun 한 번으로 자연스럽게 닫힘
+            st.rerun()
 
     # ---- UI 레이아웃 ----
     left, right = st.columns([1, 1])
@@ -270,9 +298,8 @@ def run():
             accept_multiple_files=True,
             key=f"item_{ss.item_uploader_key}",
         )
-        if st.button("아이템 리스트 삭제"):
-            ss.item_uploader_key += 1
-            # 버튼 자체가 rerun을 유발 → rerun 호출 불필요
+        if st.button("아이템 리스트 삭제", key="btn_clear_items"):
+            ss.item_uploader_key += 1  # 버튼 자체가 rerun 유발
 
         template_files = st.file_uploader(
             "2. Template 이미지 업로드",
@@ -280,7 +307,7 @@ def run():
             accept_multiple_files=True,
             key=f"tpl_{ss.template_uploader_key}",
         )
-        if st.button("템플릿 삭제"):
+        if st.button("템플릿 삭제", key="btn_clear_tpls"):
             ss.template_uploader_key += 1
 
     with right:
@@ -293,17 +320,18 @@ def run():
             key="anchor",
         )
 
-        # ----- 리사이즈 (확대 포함 + 100% 기본) -----
+        # 리사이즈 (확대 포함 + 100% 기본)
         resize_options = [1.3, 1.2, 1.1, 1.0, 0.9, 0.8, 0.7]
-        if "resize_ratio" not in st.session_state:
-            st.session_state["resize_ratio"] = 1.0
-        current = st.session_state["resize_ratio"]
+        if "resize_ratio" not in ss:
+            ss["resize_ratio"] = 1.0
+        current = ss["resize_ratio"]
         idx = resize_options.index(current) if current in resize_options else resize_options.index(1.0)
-        st.session_state["resize_ratio"] = c2.selectbox(
+        ss["resize_ratio"] = c2.selectbox(
             "리사이즈",
             resize_options,
             index=idx,
-            format_func=lambda x: f"{int(round(x*100))}%"
+            format_func=lambda x: f"{int(round(x*100))}%",
+            key="sel_resize_ratio",
         )
 
         c3.selectbox("그림자 프리셋", list(SHADOW_PRESETS.keys()), key="shadow_preset")
@@ -322,13 +350,11 @@ def run():
                    _options_signature())
 
         if cur_sig != ss.preview_sig:
-            # 단일 프리뷰 갱신
             update_preview(item_files, template_files)
-            # 다중 프리뷰 갱신
             generate_preview_list(item_files, template_files)
             ss.preview_sig = cur_sig
 
-        # ---- 미리보기 네이게이션 / 렌더 ----
+        # ---- 미리보기 네비게이션 / 렌더 ----
         if ss.preview_list:
             n = len(ss.preview_list)
             with preview_nav.container():
@@ -343,25 +369,20 @@ def run():
                         ss.preview_idx = (ss.preview_idx + 1) % n
 
             current_bytes = ss.preview_list[ss.preview_idx]
-            preview_image.image(
-                _to_streamlit_image_input(current_bytes),
-                caption=f"미리보기 #{ss.preview_idx + 1}",
-                use_column_width=True,  # 구/신버전 모두 안전
-            )
+            _st_image(_to_streamlit_image_input(current_bytes), caption=f"미리보기 #{ss.preview_idx + 1}")
             preview_hint.empty()
         else:
-            # 단일(업로드 직후) 미리보기 또는 힌트
             img_in = _to_streamlit_image_input(ss.preview_img)
             if img_in is not None:
-                preview_image.image(img_in, caption="미리보기 (단일)", use_column_width=True)
+                _st_image(img_in, caption="미리보기 (단일)")
                 preview_hint.caption("업로드/설정 변경 시 자동으로 여러 장 미리보기를 생성합니다.")
             else:
                 preview_image.empty()
                 preview_hint.caption("파일을 업로드하면 미리보기가 표시됩니다.")
 
-        # ---- 실행/다운로드 (버튼 텍스트 변경) ----
+        # ---- 이미지 생성(= 다운로드 대화상자 열기) ----
         st.button(
-            "다운로드",
+            "이미지 생성",
             type="primary",
             use_container_width=True,
             key="btn_open_save_dialog",
@@ -369,18 +390,8 @@ def run():
             on_click=lambda: show_save_dialog(item_files, template_files),
         )
 
-    # ---- 다운로드 버튼 (다이얼로그 완료 후 노출) ----
-    if ss.get("download_info"):
-        info = ss.download_info
-        st.success(f"총 {info['count']}개의 이미지 생성 완료!")
-        st.download_button(
-            "Zip 다운로드",
-            info["buffer"],
-            file_name="Thumb_Craft_Results.zip",
-            mime="application/zip",
-            use_container_width=True,
-        )
-        ss.download_info = None  # 초기화
+    # 바닥의 예전 Zip 다운로드 섹션은 제거 (대화상자에서 즉시 다운로드)
+    # if ss.get("download_info"): ...  <-- 사용 안 함
 
 
 if __name__ == "__main__":
