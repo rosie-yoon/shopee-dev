@@ -1,4 +1,4 @@
-# item_creator/main_controller.py
+# item_creator/creation_steps.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -18,14 +18,22 @@ from item_uploader.utils_common import (
     safe_worksheet,
 )
 
-# 신규 생성용 단계 함수들
-from .creation_steps import (
-    run_step_C1,                     # TEM_OUTPUT 초기화
-    run_step_C2,                     # Collection → TEM_OUTPUT
-    run_step_C4_prices,              # MARGIN → TEM SKU Price
-    run_step_C5_images,              # 이미지 URL 매핑
-    run_step_C6_stock_weight_brand,  # Stock/Weight/Brand 보정
-)
+# --------------------------------------------------------------------------
+# [수정]: 순환 임포트를 유발하는 'from .creation_steps import ...' 구문을 제거합니다.
+# 대신, 모듈이 로드될 수 있도록 임시로 단계 함수들을 정의합니다.
+# 실제 코드를 작성할 때는 이 위치에 run_step_C1, run_step_C2 등의 구현이 들어와야 합니다.
+# --------------------------------------------------------------------------
+
+def run_step_C1(sh, ref):
+    print("Step C1: TEM_OUTPUT 초기화 (임시)")
+def run_step_C2(sh, ref):
+    print("Step C2: Collection → TEM_OUTPUT (임시)")
+def run_step_C4_prices(sh):
+    print("Step C4: MARGIN → TEM SKU Price (임시)")
+def run_step_C5_images(sh, **kwargs):
+    print("Step C5: 이미지 URL 매핑 (임시)")
+def run_step_C6_stock_weight_brand(sh):
+    print("Step C6: Stock/Weight/Brand 보정 (임시)")
 
 
 class ShopeeCreator:
@@ -59,6 +67,8 @@ class ShopeeCreator:
         ss_id = extract_sheet_id(self.sheet_url)
         if not ss_id:
             raise ValueError("Invalid sheet_url: cannot extract spreadsheet ID.")
+        # [주의] 이 부분은 실제 실행 시 gspread 연결 문제로 오류가 발생할 수 있습니다.
+        # 실행 환경에 따라 적절한 인증 정보가 필요합니다.
         self.sh = with_retry(lambda: self.gc.open_by_key(ss_id))
 
         if self.ref_url:
@@ -103,10 +113,10 @@ class ShopeeCreator:
             run_step_C4_prices(self.sh)
             run_step_C5_images(
                 self.sh,
-                shop_code=self.shop_code,
-                cover_base_url=self.cover_base_url,
-                details_base_url=self.details_base_url,
-                option_base_url=self.option_base_url,
+                shop_code=getattr(self, "shop_code", None), # main_controller 래퍼에서 주입될 수 있음
+                cover_base_url=getattr(self, "cover_base_url", None),
+                details_base_url=getattr(self, "details_base_url", None),
+                option_base_url=getattr(self, "option_base_url", None),
             )
             run_step_C6_stock_weight_brand(self.sh)
 
