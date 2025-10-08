@@ -50,20 +50,20 @@ def _collect_indices(header_row: List[str]) -> Dict[str, int]:
         return _find_col_index(keys, name, extra_alias=aliases)
 
     return {
-        "create": idx("create", ["use","apply"]),  # A열 True 필터
-        "variation": idx("variation", ["variationno","variationintegrationno","var code","variation code"]),  # B
+        "create": idx("create", ["use", "apply"]),  # A열 True 필터
+        "variation": idx("variation", ["variationno", "variationintegrationno", "var code", "variation code"]),  # B
         "sku": idx("sku", ["seller_sku"]),  # C
         "brand": idx("brand", ["brandname"]),  # D
-        "option_eng": idx("option(eng)", ["optioneng","option","option1","option name","option for variation 1"]),  # F→H
-        "prod_name": idx("product name", ["item(eng)","itemeng","name"]),  # H→C
-        "desc": idx("description", ["product description"]),               # J→D
-        "category": idx("category"),                                       # K→B
-        "detail_idx": idx("details index", ["detail image count","details count","detailindex"]), # L (1~8)
+        "option_eng": idx("option(eng)", ["optioneng", "option", "option1", "option name", "option for variation 1"]),  # F→H
+        "prod_name": idx("product name", ["item(eng)", "itemeng", "name"]),  # H→C
+        "desc": idx("description", ["product description"]),  # J→D
+        "category": idx("category"),  # K→B
+        "detail_idx": idx("details index", ["detail image count", "details count", "detailindex"]),  # L (1~8)
     }
 
 
 def _is_true(v: str) -> bool:
-    return str(v or "").strip().lower() in ("true","t","1","y","yes","✔","✅")
+    return str(v or "").strip().lower() in ("true", "t", "1", "y", "yes", "✔", "✅")
 
 
 # C2: Collection → TEM_OUTPUT 생성 (매핑 + Variation 그룹 공란 보정)
@@ -75,7 +75,8 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet):
     coll_ws = safe_worksheet(sh, "Collection")
     coll_vals = with_retry(lambda: coll_ws.get_all_values()) or []
     if not coll_vals or len(coll_vals) < 2:
-        print("[C2] Collection 비어 있음."); return
+        print("[C2] Collection 비어 있음.")
+        return
 
     # 컬럼 인덱스 파싱
     colmap = _collect_indices(coll_vals[0])
@@ -89,7 +90,7 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet):
     category_i   = colmap["category"]    if colmap["category"]    >= 0 else 10
     dcount_i     = colmap["detail_idx"]  if colmap["detail_idx"]  >= 0 else 11
 
-    # ✅ 동일 Variation 그룹에서 공란을 자동 보정 (사용자가 첫 행만 채워도 동작)
+    # 동일 Variation 그룹에서 공란 자동 보정
     fill_cols = [variation_i, brand_i, pname_i, desc_i, category_i, dcount_i]
     def _reset_when(row: List[str]) -> bool:
         if not any(str(x or "").strip() for x in row):
@@ -125,23 +126,25 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet):
         category  = (row[category_i] if category_i < len(row) else "").strip()
 
         if not category:
-            failures.append(["", "", pname, "CATEGORY_MISSING", f"row={r+1}"]); continue
+            failures.append(["", "", pname, "CATEGORY_MISSING", f"row={r+1}"])
+            continue
 
         # 카테고리 최상위별 헤더 세트 선택
         top_norm = header_key(top_of_category(category) or "")
         headers = template_dict.get(top_norm)
         if not headers:
-            failures.append(["", category, pname, "TEMPLATE_TOPLEVEL_NOT_FOUND", f"top={top_of_category(category)}"]); continue
+            failures.append(["", category, pname, "TEMPLATE_TOPLEVEL_NOT_FOUND", f"top={top_of_category(category)}"])
+            continue
 
         # TEM_OUTPUT 한 행 구성 (PID 컬럼은 별도 추가)
         tem_row = [""] * len(headers)
-        # 매핑 규칙 (너가 정한 룰)
-        set_if_exists(headers, tem_row, "category", category)                   # K → B
-        set_if_exists(headers, tem_row, "product name", pname)                  # H → C
-        set_if_exists(headers, tem_row, "product description", desc)            # J → D
-        set_if_exists(headers, tem_row, "variation integration", variation)     # B → F
-        set_if_exists(headers, tem_row, "variation name1", "Options")           # 고정값 → G
-        set_if_exists(headers, tem_row, "option for variation 1", opt1)         # F → H
+        # 매핑 규칙
+        set_if_exists(headers, tem_row, "category", category)                    # K → B
+        set_if_exists(headers, tem_row, "product name", pname)                   # H → C
+        set_if_exists(headers, tem_row, "product description", desc)             # J → D
+        set_if_exists(headers, tem_row, "variation integration", variation)      # B → F
+        set_if_exists(headers, tem_row, "variation name1", "Options")            # 고정값 → G
+        set_if_exists(headers, tem_row, "option for variation 1", opt1)          # F → H
         set_if_exists(headers, tem_row, "sku", sku)                              # C → N
         set_if_exists(headers, tem_row, "brand", brand)                          # D → AE
 
@@ -170,12 +173,90 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet):
             ws_f = safe_worksheet(sh, "Failures")
         except WorksheetNotFound:
             ws_f = with_retry(lambda: sh.add_worksheet(title="Failures", rows=1000, cols=10))
-            with_retry(lambda: ws_f.update(values=[["PID","Category","Name","Reason","Detail"]], range_name="A1"))
+            with_retry(lambda: ws_f.update(values=[["PID", "Category", "Name", "Reason", "Detail"]], range_name="A1"))
         vals = with_retry(lambda: ws_f.get_all_values()) or []
         start = len(vals) + 1
         with_retry(lambda: ws_f.update(values=failures, range_name=f"A{start}"))
 
     print(f"C2 Done. Buckets: {len(buckets)}")
+
+
+# C4: MARGIN → TEM 가격 매핑 (SKU 기준, 'SKU Price' 채우기)
+def run_step_C4_prices(sh: gspread.Spreadsheet):
+    print("\n[ Create ] Step C4: Fill SKU Price from MARGIN ...")
+    tem_name = get_tem_sheet_name()
+    tem_ws = safe_worksheet(sh, tem_name)
+    tem_vals = with_retry(lambda: tem_ws.get_all_values()) or []
+    if not tem_vals:
+        print("[C4] TEM_OUTPUT 비어 있음.")
+        return
+
+    # 1) MARGIN 시트 로드 (SKU ↔ 소비자가)
+    try:
+        mg_ws = safe_worksheet(sh, "MARGIN")
+    except WorksheetNotFound:
+        print("[C4] MARGIN 시트를 찾을 수 없습니다. 가격 매핑을 건너뜁니다.")
+        return
+    mg_vals = with_retry(lambda: mg_ws.get_all_values()) or []
+    if len(mg_vals) < 2:
+        print("[C4] MARGIN 데이터가 비어 있습니다.")
+        return
+
+    mg_keys = [header_key(h) for h in mg_vals[0]]
+    # A열 SKU, E열 소비자가(라벨은 유연하게 대응)
+    idx_mg_sku   = _find_col_index(mg_keys, "sku", extra_alias=["seller_sku"])
+    idx_mg_price = _find_col_index(
+        mg_keys, "소비자가",
+        extra_alias=["consumer price", "consumerprice", "price", "list price", "selling price", "sell price"]
+    )
+    if idx_mg_sku == -1 or idx_mg_price == -1:
+        print(f"[C4] MARGIN 헤더 인식 실패: sku={idx_mg_sku}, price={idx_mg_price}")
+        return
+
+    sku_to_price: Dict[str, str] = {}
+    for r in range(1, len(mg_vals)):
+        row = mg_vals[r]
+        sku = (row[idx_mg_sku] if idx_mg_sku < len(row) else "").strip()
+        price = (row[idx_mg_price] if idx_mg_price < len(row) else "").strip()
+        if sku and price:
+            sku_to_price[sku] = price
+
+    # 2) TEM에서 블록별 헤더 탐지 후 SKU/Price 인덱스 찾아 채움
+    updates: List[Cell] = []
+    cur_headers = None
+    idx_t_sku = idx_t_price = -1
+
+    for r0, row in enumerate(tem_vals):
+        # 각 카테고리 블록의 헤더 경계 (두 번째 열이 'Category')
+        if (row[1] if len(row) > 1 else "").strip().lower() == "category":
+            cur_headers = [header_key(h) for h in row[1:]]
+            idx_t_sku   = _find_col_index(cur_headers, "sku")
+            idx_t_price = _find_col_index(
+                cur_headers, "sku price",
+                extra_alias=["price", "selling price", "sell price"]
+            )
+            continue
+        if not cur_headers or idx_t_sku == -1 or idx_t_price == -1:
+            continue
+
+        # 실제 데이터 행: TEM은 A열 PID + 이후 헤더들과 정렬되어 있으므로 +1 보정
+        sku = (row[idx_t_sku + 1] if len(row) > idx_t_sku + 1 else "").strip()
+        if not sku:
+            continue
+
+        val = sku_to_price.get(sku, "")
+        if not val:
+            continue
+
+        # 값이 다를 때만 업데이트
+        cur = (row[idx_t_price + 1] if len(row) > idx_t_price + 1 else "").strip()
+        if cur != val:
+            updates.append(Cell(row=r0 + 1, col=idx_t_price + 2, value=val))
+
+    if updates:
+        with_retry(lambda: tem_ws.update_cells(updates, value_input_option="RAW"))
+
+    print(f"C4 Done. Prices updated: {len(updates)} cells")
 
 
 # C5: 이미지 URL 채우기 (Option/Cover/Details) + Variation 복원
@@ -192,7 +273,8 @@ def run_step_C5_images(
     tem_ws = safe_worksheet(sh, tem_name)
     tem_vals = with_retry(lambda: tem_ws.get_all_values()) or []
     if not tem_vals:
-        print("[C5] TEM_OUTPUT 비어 있음."); return
+        print("[C5] TEM_OUTPUT 비어 있음.")
+        return
 
     coll_ws = safe_worksheet(sh, "Collection")
     coll_vals = with_retry(lambda: coll_ws.get_all_values()) or []
@@ -214,7 +296,9 @@ def run_step_C5_images(
             if not any(str(x or "").strip() for x in row):
                 return True
             return not _is_true(row[create_i] if create_i < len(row) else "")
-        ff_vals = forward_fill_by_group(coll_vals, group_idx=variation_i, fill_col_indices=fill_cols, reset_when=_reset_when)
+        ff_vals = forward_fill_by_group(
+            coll_vals, group_idx=variation_i, fill_col_indices=fill_cols, reset_when=_reset_when
+        )
 
         for r in range(1, len(ff_vals)):
             row = ff_vals[r]
