@@ -7,13 +7,6 @@ import zipfile
 import streamlit as st
 from PIL import Image
 
-try:
-    from ui_theme import title_with_icon
-except Exception:
-    # ui_theme를 못 불러와도 앱은 돌아가도록 안전장치
-    def title_with_icon(title: str, icon_name: str, size: int = 28):
-        st.title(title)
-
 # 상대 임포트: image_compose/composer_utils.py 가 같은 폴더에 있어야 합니다.
 # 패키지 인식을 위해 image_compose/__init__.py 도 반드시 존재해야 합니다.
 from .composer_utils import compose_one_bytes, SHADOW_PRESETS, has_useful_alpha, ensure_rgba
@@ -24,9 +17,7 @@ def run():
     # 페이지 구성은 래퍼(pages/1_image_compose.py)에서 이미 호출하므로 여기서는 호출하지 않습니다.
     # st.set_page_config(page_title="Cover Image", layout="wide")
 
-    # 기존: st.title("Cover Image")
-    title_with_icon("Cover Image", "cover")  # assets/icons/cover(.png | @3x.png)
-
+    st.title("Cover Image")
 
     # ---- 세션 상태 초기화 ----
     def init_state():
