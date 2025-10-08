@@ -14,6 +14,16 @@ from .composer_utils import compose_one_bytes, SHADOW_PRESETS, has_useful_alpha,
 BASE_DIR = Path(__file__).resolve().parent
 
 
+# ---------- Streamlit 호환 이미지 렌더 ----------
+def _st_image(img, **kwargs):
+    """Streamlit 버전별 image 인자 호환: use_container_width(신) ↔ use_column_width(구)"""
+    try:
+        return st.image(img, use_container_width=True, **kwargs)
+    except TypeError:
+        kwargs.pop("use_container_width", None)
+        return st.image(img, use_column_width=True, **kwargs)
+
+
 # ---------- Streamlit이 받을 수 있는 이미지 타입으로 정규화 ----------
 def _to_streamlit_image_input(x):
     """Streamlit이 받는 타입으로 정규화: PIL.Image | bytes | bytearray | BytesIO | 파일경로"""
@@ -39,19 +49,21 @@ def _to_streamlit_image_input(x):
 
 
 def run():
-    # (중요) set_page_config는 래퍼(pages/1_Cover Image.py)에서만 호출
+    # (주의) set_page_config는 래퍼(pages/1_Cover Image.py)에서 호출
     st.title("Cover Image")
 
     # ---- 세션 상태 초기화 ----
     def init_state():
         defaults = {
             "anchor": "center",
-            "resize_ratio": 1.0,
+            "resize_ratio": 1.0,       # 기본 100%
             "shadow_preset": "off",
             "item_uploader_key": 0,
             "template_uploader_key": 0,
-            "preview_img": None,     # bytes
-            "download_info": None,   # {"buffer": BytesIO, "count": int}
+            "preview_img": None,       # bytes (단일 미리보기)
+            "preview_list": [],        # bytes 리스트 (다중 미리보기)
+            "preview_idx": 0,          # 다중 미리보기 인덱스
+            "download_info": None,     # {"buffer": BytesIO, "count": int}
         }
         for k, v in defaults.items():
             st.session_state.setdefault(k, v)
@@ -110,6 +122,53 @@ def run():
             data = bytes(result)
 
         ss.preview_img = data
+
+    # ---- 다중 미리보기 생성 ----
+    def generate_preview_list(item_files, template_files, max_count: int = 12):
+        """업로드된 아이템 × 템플릿 조합으로 최대 max_count장의 미리보기(bytes) 생성."""
+        ss.preview_list = []
+        ss.preview_idx = 0
+
+        if not item_files or not template_files:
+            return
+
+        opts_base = {
+            "anchor": ss.anchor,
+            "resize_ratio": ss.resize_ratio,
+            "shadow_preset": ss.shadow_preset,
+            "out_format": "PNG",
+        }
+
+        out = []
+        # 아이템 × 템플릿 순회 (과도한 생성 방지 위해 max_count 제한)
+        for item_file in item_files:
+            if len(out) >= max_count:
+                break
+            try:
+                item_img = PILImage.open(io.BytesIO(item_file.getvalue()))
+                if not has_useful_alpha(ensure_rgba(item_img)):
+                    continue
+            except Exception:
+                continue
+
+            for template_file in template_files:
+                if len(out) >= max_count:
+                    break
+                try:
+                    template_img = PILImage.open(io.BytesIO(template_file.getvalue()))
+                except Exception:
+                    continue
+
+                result = compose_one_bytes(item_img, template_img, **opts_base)
+                if not result:
+                    continue
+
+                buf = result[0]
+                data = buf.getvalue() if hasattr(buf, "getvalue") else (bytes(buf) if isinstance(buf, (bytes, bytearray)) else None)
+                if data:
+                    out.append(data)
+
+        ss.preview_list = out
 
     # ---- 배치 합성 & Zip 생성 ----
     def run_batch_composition(item_files, template_files, fmt, quality, shop_variable):
@@ -202,24 +261,60 @@ def run():
              "top-left", "top-right", "bottom-left", "bottom-right"],
             key="anchor",
         )
-        c2.selectbox(
+
+        # ----- 리사이즈 (확대 포함 + 100% 기본) -----
+        resize_options = [1.3, 1.2, 1.1, 1.0, 0.9, 0.8, 0.7]
+        if "resize_ratio" not in st.session_state:
+            st.session_state["resize_ratio"] = 1.0
+        current = st.session_state["resize_ratio"]
+        idx = resize_options.index(current) if current in resize_options else resize_options.index(1.0)
+        st.session_state["resize_ratio"] = c2.selectbox(
             "리사이즈",
-            [1.0, 0.9, 0.8, 0.7, 0.6],
-            format_func=lambda x: f"{int(x*100)}%" if x < 1.0 else "없음",
-            key="resize_ratio",
+            resize_options,
+            index=idx,
+            format_func=lambda x: f"{int(round(x*100))}%"
         )
+
         c3.selectbox("그림자 프리셋", list(SHADOW_PRESETS.keys()), key="shadow_preset")
 
-        # 설정 변경 시 미리보기 업데이트
+        # 설정 변경 시 단일 미리보기 갱신
         update_preview(item_files, template_files)
 
         st.subheader("미리보기")
+
+        # 다중 미리보기 생성/갱신
+        if st.button("미리보기 전체 생성/업데이트", use_container_width=True):
+            with st.spinner("미리보기를 생성 중입니다..."):
+                generate_preview_list(item_files, template_files)
+            st.rerun()
+
+        # 단일(업로드 직후) 미리보기
         img_in = _to_streamlit_image_input(ss.preview_img)
-        if img_in is not None:
-            st.image(img_in, caption="미리보기 (첫번째 조합)", use_column_width=True)
-        else:
+        if img_in is not None and not ss.preview_list:
+            _st_image(img_in, caption="미리보기 (단일)")
+            st.caption("‘미리보기 전체 생성/업데이트’를 누르면 여러 장을 넘기며 볼 수 있어요.")
+
+        # 다중 미리보기 페이저
+        if ss.preview_list:
+            n = len(ss.preview_list)
+            cprev, ccenter, cnext = st.columns([1, 5, 1])
+            with cprev:
+                if st.button("◀", use_container_width=True):
+                    ss.preview_idx = (ss.preview_idx - 1) % n
+                    st.rerun()
+            with ccenter:
+                st.write(f"**{ss.preview_idx + 1} / {n}**")
+            with cnext:
+                if st.button("▶", use_container_width=True):
+                    ss.preview_idx = (ss.preview_idx + 1) % n
+                    st.rerun()
+
+            current_bytes = ss.preview_list[ss.preview_idx]
+            _st_image(_to_streamlit_image_input(current_bytes), caption=f"미리보기 #{ss.preview_idx + 1}")
+        elif not img_in:
             st.caption("파일을 업로드하면 미리보기가 표시됩니다.")
 
+        # 실행/다운로드
         st.button(
             "생성하기",
             type="primary",
