@@ -84,14 +84,7 @@ class ShopeeCreator:
     # ----------------------------------------------------------
     # 실행
     # ----------------------------------------------------------
-
-    def run(
-        self,
-        shop_code: str,
-        cover_base_url: str,
-        details_base_url: str,
-        option_base_url: str,
-    ) -> bool:
+    def run(self) -> bool:
         """
         실행 전체 파이프라인:
           C1 → C2 → C4 → C5 → C6
@@ -110,10 +103,10 @@ class ShopeeCreator:
             run_step_C4_prices(self.sh)
             run_step_C5_images(
                 self.sh,
-                shop_code=shop_code,
-                cover_base_url=cover_base_url,
-                details_base_url=details_base_url,
-                option_base_url=option_base_url,
+                shop_code=self.shop_code,
+                cover_base_url=self.cover_base_url,
+                details_base_url=self.details_base_url,
+                option_base_url=self.option_base_url,
             )
             run_step_C6_stock_weight_brand(self.sh)
 
@@ -122,7 +115,10 @@ class ShopeeCreator:
 
         except Exception as e:
             print(f"[ERROR] ShopeeCreator.run() 실패: {e}")
+            import traceback
+            traceback.print_exc()
             return False
+
 
     # ----------------------------------------------------------
     # CSV Export
