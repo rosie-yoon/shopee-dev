@@ -247,7 +247,8 @@ def run():
             help="입력 시 'Item_C_구분값.jpg' 형식으로 저장됩니다.",
         )
 
-        if st.button("다운로드", type="primary", use_container_width=True):
+        if st.button("다운로드", type="primary", use_container_width=True, key="btn_confirm_download"):
+
             with st.spinner("이미지를 생성 중입니다..."):
                 zip_buf, count = run_batch_composition(
                     item_files, template_files, fmt, quality, shop_variable
@@ -333,12 +334,12 @@ def run():
             with preview_nav.container():
                 cprev, ccenter, cnext = st.columns([1, 5, 1])
                 with cprev:
-                    if st.button("◀", use_container_width=True):
+                    if st.button("◀", use_container_width=True, key="nav_prev"):
                         ss.preview_idx = (ss.preview_idx - 1) % n
                 with ccenter:
                     st.write(f"**{ss.preview_idx + 1} / {n}**")
                 with cnext:
-                    if st.button("▶", use_container_width=True):
+                    if st.button("▶", use_container_width=True, key="nav_next"):
                         ss.preview_idx = (ss.preview_idx + 1) % n
 
             current_bytes = ss.preview_list[ss.preview_idx]
@@ -363,6 +364,7 @@ def run():
             "다운로드",
             type="primary",
             use_container_width=True,
+            key="btn_open_save_dialog",
             disabled=(not item_files or not template_files),
             on_click=lambda: show_save_dialog(item_files, template_files),
         )
