@@ -1,14 +1,24 @@
+# pages/1_Cover Image.py
 import streamlit as st
 from pathlib import Path
 import sys
 
-# pages/ 아래에 있으므로 프로젝트 루트(shopee)를 sys.path에 추가 (견고성 ↑)
+# (중요) 프로젝트 루트(shopee_v1) 경로 추가
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from image_compose.app import run as image_compose_run  # 폴더명이 image_compose 여야 함
+# 공통 테마
+from ui_theme import apply_theme
 
-st.set_page_config(page_title="Cover Image", layout="wide")
+# 하위 앱 임포트 (폴더명 유지)
+from image_compose.app import run as image_compose_run
 
+# 페이지 설정 (항상 첫 호출)
+st.set_page_config(page_title="Cover Image", layout="wide", initial_sidebar_state="expanded")
+
+# 홈이 아니므로 사이드바 보이되 톤 적용
+apply_theme(hide_sidebar=False)
+
+# 실제 페이지 실행
 image_compose_run()
