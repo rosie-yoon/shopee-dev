@@ -57,6 +57,8 @@ ICONS = {
 
 # --------------------------------------------------------------------
 # 페이지 전용 스타일 (카드만)
+#  - 밑줄 제거/hover 밑줄 제거
+#  - 같은 탭 전환(target=_self)과 함께 사용
 # --------------------------------------------------------------------
 st.markdown(
     """
@@ -73,9 +75,19 @@ st.markdown(
       }
       .ui-card:hover{ background: rgba(255,255,255,.12); transform: translateY(-1px); }
 
-      /* 카드 링크(전체 클릭) */
-      .card-link{ display:block; text-decoration:none; color:inherit; }
-      .card-link:focus{ outline: none; }
+      /* 카드 링크(전체 클릭) - 밑줄/하이라이트 제거 */
+      a.card-link {
+        display:block;
+        text-decoration:none !important;
+        color:inherit !important;
+        -webkit-tap-highlight-color: transparent;
+        outline:none !important;
+      }
+      a.card-link:hover,
+      a.card-link:active,
+      a.card-link *{
+        text-decoration:none !important;
+      }
 
       /* 헤더(아이콘+타이틀) 가로 정렬 */
       .row{ display:flex; align-items:center; gap:10px; margin-bottom:6px; }
@@ -123,7 +135,7 @@ for col, c in zip(cols, cards):
         href = f"?nav={quote(c['path'])}"
         st.markdown(
             f"""
-            <a class="card-link" href="{href}">
+            <a class="card-link" href="{href}" target="_self" rel="noopener">
               <div class="ui-card">
                 <div class="row">
                   {'<img src="data:image/png;base64,'+b64+'" alt="icon"/>' if b64 else ''}
