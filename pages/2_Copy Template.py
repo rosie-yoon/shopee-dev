@@ -1,4 +1,10 @@
 # pages/2_Copy Template.py
+import os, sys
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+
 from pathlib import Path
 import sys
 import streamlit as st
@@ -17,7 +23,7 @@ if str(ROOT) not in sys.path:
 # --------------------------------------------------------------------
 # [수정] 레거시 item_uploader 경로를 모두 제거하고 루트 utils_common 사용
 import utils_common
-from utils_common import (
+from shopee_v1.utils_common import (
     extract_sheet_id, sheet_link,
     get_env, save_env_value
 )
