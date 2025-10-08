@@ -7,7 +7,27 @@ import traceback
 import gspread
 from gspread.exceptions import WorksheetNotFound  # ⬅️ 추가
 
-# ... (생략)
+# --- URL → Google Sheet ID 추출 유틸 확보 (안전 임포트 + 폴백) ---
+try:
+    # item_creator 쪽에 있으면 우선 사용
+    from item_creator.utils_common import extract_sheet_id
+except Exception:
+    try:
+        # 없으면 기존 검증된 모듈에서 시도
+        from item_uploader.utils_common import extract_sheet_id
+    except Exception:
+        # 최후 폴백: 간단한 정규식 구현
+        import re
+        def extract_sheet_id(url: str | None) -> str:
+            if not url:
+                return ""
+            s = str(url).strip()
+            if s.startswith("http"):
+                m = re.search(r"/spreadsheets/d/([a-zA-Z0-9\-_]+)", s)
+                return m.group(1) if m else s
+            # 이미 ID로 들어온 경우
+            return s
+
 
 class ShopeeCreator:
     def __init__(
