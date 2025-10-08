@@ -2,84 +2,106 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import streamlit as st
+from typing import Callable, Optional, Dict, Any, List
+import traceback
 import gspread
 
-from item_creator.utils_common import (
-    get_env,
-    save_env_value,
-    extract_sheet_id,
-    authorize_gspread,
-)
+# --- utils 공용 가져오기: creator 우선, 없으면 uploader의 검증된 구현 사용 ---
+try:
+    from item_creator.utils_common import authorize_gspread, extract_sheet_id  # 있을 수도 있음
+except Exception:
+    from item_uploader.utils_common import authorize_gspread, extract_sheet_id  # 검증된 경로
+
 from .creation_steps import (
-    run_step_C1,
-    run_step_C2,
-    run_step_C4_prices,   # 신규: 가격 매핑
-    run_step_C5_images,   # 기존: 이미지 URL/Variation 복원
+    run_step_C1,           # TEM_OUTPUT 초기화
+    run_step_C2,           # Collection -> TEM_OUTPUT 생성
+    run_step_C4_prices,    # MARGIN 가격 -> TEM 'SKU Price'
+    run_step_C5_images,    # 이미지 URL + Variation 복원
 )
 
-class CreateItemsController:
-    def __init__(self):
-        self.gc: gspread.Client | None = None
-        self.sh: gspread.Spreadsheet | None = None
-        self.ref: gspread.Spreadsheet | None = None
+ProgressCB = Callable[[int, str], None]
 
-    # 필요시 호출: 세션/입력값은 이미 별도 페이지에서 저장해 둔 상태라고 가정
+def _progress(cb: Optional[ProgressCB], p: int, msg: str):
+    if cb:
+        try:
+            cb(p, msg)
+        except Exception:
+            pass
+
+class ShopeeCreator:
+    """
+    pages/3_Create Items.py가 기대하는 실행 컨트롤러.
+
+    __init__(creation_spreadsheet_id, cover_base_url, details_base_url, option_base_url, ref_spreadsheet_id=None)
+    run(progress_callback=...) -> dict
+    """
+    def __init__(
+        self,
+        creation_spreadsheet_id: str,
+        cover_base_url: str,
+        details_base_url: str,
+        option_base_url: str,
+        ref_spreadsheet_id: Optional[str] = None,
+    ):
+        self.creation_spreadsheet_id = creation_spreadsheet_id
+        self.cover_base_url = cover_base_url
+        self.details_base_url = details_base_url
+        self.option_base_url = option_base_url
+        self.ref_spreadsheet_id = ref_spreadsheet_id
+
+        self.gc: Optional[gspread.Client] = None
+        self.sh: Optional[gspread.Spreadsheet] = None
+        self.ref: Optional[gspread.Spreadsheet] = None
+
     def _connect(self):
         self.gc = authorize_gspread()
+        if not self.creation_spreadsheet_id:
+            raise RuntimeError("상품등록 시트 ID가 비어 있습니다.")
+        self.sh = self.gc.open_by_key(self.creation_spreadsheet_id)
+        if self.ref_spreadsheet_id:
+            self.ref = self.gc.open_by_key(self.ref_spreadsheet_id)
+        else:
+            self.ref = None
 
-        sheet_url = get_env("NEW_CREATE_SHEET_URL") or ""
-        ref_url   = get_env("REFERENCE_SHEET_URL") or ""
-        if not sheet_url or not ref_url:
-            raise RuntimeError("필수 URL이 비어 있습니다. (상품등록 시트/레퍼런스 시트)")
+    def run(self, progress_callback: Optional[ProgressCB] = None) -> Dict[str, Any]:
+        logs: List[str] = []
 
-        self.sh  = self.gc.open_by_key(extract_sheet_id(sheet_url))
-        self.ref = self.gc.open_by_key(extract_sheet_id(ref_url))
+        def log_step(msg: str, p: int):
+            logs.append(msg)
+            _progress(progress_callback, p, msg)
 
-    def run(self):
-        st.subheader("실행")
+        try:
+            # 0) 연결
+            log_step("Google Sheets 연결 중...", 5)
+            self._connect()
 
-        # 실행에 필요한 값 로드 (이미 ‘입력 & 저장’ 단계에서 저장했다고 가정)
-        shop_code   = get_env("CREATE_SHOP_CODE") or ""
-        cover_base  = get_env("CREATE_COVER_BASE_URL") or ""
-        details_base= get_env("CREATE_DETAILS_BASE_URL") or ""
-        option_base = get_env("CREATE_OPTION_BASE_URL") or ""
+            # 1) TEM_OUTPUT 초기화
+            log_step("C1: TEM_OUTPUT 초기화...", 15)
+            run_step_C1(self.sh, self.ref)
 
-        # 기본 유효성 체크 (홈/입력 섹션에서 비활성화 이미 해두셨겠지만, 여기서도 한 번 더 방어)
-        missing = []
-        if not cover_base:   missing.append("Cover URL")
-        if not details_base: missing.append("Details URL")
-        if not option_base:  missing.append("Option URL")
-        if missing:
-            st.error("다음 항목이 비어 있습니다: " + ", ".join(missing))
-            return
+            # 2) Collection → TEM_OUTPUT 생성
+            log_step("C2: Collection → TEM_OUTPUT 생성...", 45)
+            if not self.ref:
+                raise RuntimeError("레퍼런스 시트가 필요합니다. (TemplateDict 등)")
+            run_step_C2(self.sh, self.ref)
 
-        if st.button("실행", type="primary", use_container_width=True, key="btn_create_run"):
-            try:
-                self._connect()
+            # 3) 가격 매핑
+            log_step("C4: 가격 매핑(MARGIN → TEM ‘SKU Price’) 적용...", 65)
+            run_step_C4_prices(self.sh)
 
-                # C1: TEM_OUTPUT 초기화
-                run_step_C1(self.sh, self.ref)
+            # 4) 이미지 URL + Variation 복원
+            log_step("C5: 이미지 URL 채우기 + Variation 복원...", 85)
+            run_step_C5_images(
+                sh=self.sh,
+                shop_code="",  # 필요 시 env/폼에서 받은 값으로 교체 가능
+                cover_base_url=self.cover_base_url,
+                details_base_url=self.details_base_url,
+                option_base_url=self.option_base_url,
+            )
 
-                # C2: Collection → TEM_OUTPUT (A열 True / Variation 그룹 공란 자동 보정 포함)
-                run_step_C2(self.sh, self.ref)
+            log_step("완료!", 100)
+            return {"logs": logs}
 
-                # C4: (신규) 가격 매핑: MARGIN(A=SKU, E=소비자가) → TEM_OUTPUT('SKU Price')
-                run_step_C4_prices(self.sh)
-
-                # C5: 이미지 URL 채우기 + Variation 복원
-                #     - Cover: (VIN 있으면 VIN, 아니면 SKU) + _C_{shop_code}.jpg
-                #     - Option: OptionBaseURL + SKU
-                #     - Details: DetailsBaseURL + (VIN or SKU) + _D1.._D{1~8}
-                run_step_C5_images(
-                    self.sh,
-                    shop_code=shop_code,
-                    cover_base_url=cover_base,
-                    details_base_url=details_base,
-                    option_base_url=option_base,
-                )
-
-                st.success("템플릿 생성 완료! (C1→C2→C4→C5)")
-
-            except Exception as e:
-                st.exception(e)
+        except Exception as e:
+            logs.append(f"[오류]\n{traceback.format_exc()}")
+            return {"logs": logs, "error": str(e)}
