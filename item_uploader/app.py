@@ -7,6 +7,12 @@ from __future__ import annotations
 from pathlib import Path
 import streamlit as st
 
+try:
+    from ui_theme import title_with_icon
+except Exception:
+    def title_with_icon(title: str, icon_name: str, size: int = 28):
+        st.title(title)
+
 # ---- 패키지 내부 모듈: 상대 임포트로 통일 ----
 from .utils_common import (
     get_env, load_env
@@ -30,7 +36,7 @@ def run() -> None:
         st.session_state.setdefault(k, v)
 
     # ---- 헤더 / 타이틀 ----
-    st.title("⬆️ Copy Template")
+    title_with_icon("Copy Template", "copy")
 
     # ---- CSS ----
     st.markdown(
