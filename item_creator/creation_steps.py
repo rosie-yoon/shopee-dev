@@ -311,8 +311,7 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet):
         if len(mg_vals) >= 2:
             mg_keys = [header_key(h) for h in mg_vals[0]]
             
-            # [STEP 4 이식 확인]: _pick_index_by_candidates 대신 _find_col_index를 사용하여
-            # automation_steps.py의 인덱스 후보를 적용
+            # [STEP 4 이식 확인]: _pick_index_by_candidates를 사용하여 인덱스 후보 적용
             idx_mg_sku = _pick_index_by_candidates(mg_vals[0], ["sku", "seller_sku"]) 
             # Weight 채우기 (automation_steps.py의 STEP 4와 동일한 후보)
             idx_mg_weight = _pick_index_by_candidates(mg_vals[0], ["weight", "package weight"])
@@ -596,7 +595,8 @@ class ShopeeCreator:
     # CSV Export (main_controller가 fallback으로 사용)
     # ----------------------------------------------------------
 
-    def get_tem_values_csv(self) -> Optional[bytes]:
+    # [수정] main_controller의 get_tem_values_csv() 폴백을 우회하기 위해 함수명을 변경합니다.
+    def get_tem_values_for_csv_fallback(self) -> Optional[bytes]:
         """TEM_OUTPUT 시트를 CSV 바이트로 반환 (PID 제거 및 Category 정규화는 XLSX에서 처리)"""
         # CSV 폴백 로직은 PID 제거 및 Category 정규화 로직을 유지합니다. (자동 배포된 CSV 파일에 적용)
         if not self.sh:
