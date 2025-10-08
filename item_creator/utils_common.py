@@ -361,3 +361,67 @@ def open_creation_by_env():
     if not ss_id:
         raise RuntimeError("CREATION_SPREADSHEET_ID (or CREATION_SHEET_KEY) not set in secrets/env.")
     return _authorize_and_open_by_key(ss_id)
+
+# ==== [APPEND AT BOTTOM OF FILE] ============================================
+# 필요한 경우에만 인증 클라이언트를 돌려주는 범용 함수 + 시트ID 파서
+# 기존 코드와 충돌하지 않도록 함수 내부에 필요한 모듈을 import 합니다.
+
+def authorize_gspread():
+    """인증된 gspread.Client 인스턴스를 반환합니다.
+    우선순위: st.secrets['gcp_service_account'] → GOOGLE_APPLICATION_CREDENTIALS → service_account.json
+    """
+    # 1) Streamlit secrets (권장)
+    try:
+        import streamlit as st
+        if "gcp_service_account" in st.secrets:
+            from google.oauth2.service_account import Credentials
+            import gspread
+            creds_info = dict(st.secrets["gcp_service_account"])
+            scopes = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ]
+            creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
+            return gspread.authorize(creds)
+    except Exception:
+        pass
+
+    # 2) GOOGLE_APPLICATION_CREDENTIALS (서비스 계정 키 파일 경로)
+    try:
+        import os
+        from google.oauth2.service_account import Credentials
+        import gspread
+        cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+        if cred_path and os.path.exists(cred_path):
+            scopes = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ]
+            creds = Credentials.from_service_account_file(cred_path, scopes=scopes)
+            return gspread.authorize(creds)
+    except Exception:
+        pass
+
+    # 3) 로컬 service_account.json (개발 용)
+    try:
+        import gspread
+        return gspread.service_account()
+    except Exception as e:
+        raise RuntimeError(
+            "Google 인증 실패: st.secrets['gcp_service_account'] / "
+            "GOOGLE_APPLICATION_CREDENTIALS / service_account.json 을 확인하세요."
+        ) from e
+
+
+def extract_sheet_id(url_or_id: str) -> str:
+    """Google Sheets URL 또는 순수 ID를 모두 허용. URL이면 d/<ID> 패턴에서 ID 추출."""
+    if not url_or_id:
+        raise ValueError("빈 시트 URL/ID 입니다.")
+    try:
+        import re
+        m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url_or_id)
+        return m.group(1) if m else url_or_id.strip()
+    except Exception:
+        return url_or_id.strip()
+# ==== [END APPEND] ===========================================================
+
