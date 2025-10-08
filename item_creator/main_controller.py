@@ -1,157 +1,140 @@
 # -*- coding: utf-8 -*-
 """
-main_controller.py  (A안: 페이지와 100% 호환 + 의존 경로 완화 + 무수정 동작)
+main_controller.py (A안 v2: 배포 환경에서 utils_common 확실히 찾도록 보강)
 
-목표
-- Streamlit 페이지(pages/3_Create Items.py)가 기대하는 인터페이스와 정확히 일치
-  - 클래스명: ShopeeCreator
-  - __init__(sheet_url, ref_url=None, cover_base_url=None, details_base_url=None,
-             option_base_url=None, shop_code=None, **kwargs)
-  - run() -> bool
-  - get_tem_values_csv() -> Optional[bytes]
-- 외부 패키지 경로(item_uploader.*, item_creator.*)에 묶이지 않도록 안전한 임포트/폴백
-  - 로컬 utils_common.py를 우선 사용
-  - creation_steps.py가 과거 경로를 임포트하더라도, 런타임 shim으로 해결
-
-동작 개요
-- (1) utils_common 임포트: 로컬 > item_creator.utils_common > item_uploader.utils_common
-- (2) shim 등록: creation_steps가 과거 경로를 임포트해도 통과되도록
-- (3) creation_steps 모듈 임포트 후, 내부 ShopeeCreator를 위임 객체(impl)로 사용
-- (4) 페이지가 넘겨준 base URL / shop_code는 impl에 동일 이름 속성으로 주입(존재 유무 무관)
-
-※ 다른 파일은 수정하지 않아도 됩니다.
+- 페이지(pages/3_Create Items.py)와 인터페이스 100% 호환:
+  class ShopeeCreator(...); run()->bool; get_tem_values_csv()->Optional[bytes]
+- utils_common 임포트 안정화:
+  1) repo root를 sys.path에 선주입
+  2) 실패 시, 파일 경로에서 직접 모듈 로드
+  3) item_creator / item_uploader 경로 폴백
+- creation_steps의 레거시 import를 shim으로 흡수
 """
 
 from __future__ import annotations
+from typing import Optional
+import sys, types, io, csv
+from pathlib import Path
+import importlib, importlib.util
 
-from typing import Optional, Tuple
-import sys
-import types
-import io
-import csv
+# -----------------------------------------------------------------------------
+# 0) repo root를 sys.path에 선주입 (배포 환경 보호)
+# -----------------------------------------------------------------------------
+_THIS = Path(__file__).resolve()                          # .../item_creator/main_controller.py
+_ROOT = _THIS.parents[1]                                  # repo root
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+# item_creator 폴더도 보수적으로 추가
+_ITEM_CREATOR_DIR = _THIS.parent
+if str(_ITEM_CREATOR_DIR) not in sys.path:
+    sys.path.insert(0, str(_ITEM_CREATOR_DIR))
 
-# ---------------------------------------------------------------------
-# 1) 안전한 utils 임포트 (로컬 우선)
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# 1) utils_common 안전 임포트 (로컬 > 직접 로드 > item_creator > item_uploader)
+# -----------------------------------------------------------------------------
 _last_import_error = None
 
 authorize_gspread = None
 extract_sheet_id = None
 get_tem_sheet_name = None
 
-# 로컬 utils_common.py 우선
+def _load_utils_direct() -> object:
+    """루트의 utils_common.py를 경로로 직접 로드."""
+    uc_path = _ROOT / "utils_common.py"
+    if not uc_path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("utils_common", uc_path)
+    if not spec or not spec.loader:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["utils_common"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+# (a) 로컬 이름 임포트 시도
+utils_mod = None
 try:
-    from utils_common import authorize_gspread as _auth_local
-    from utils_common import extract_sheet_id as _extract_local
-    # get_tem_sheet_name 이 없을 수도 있어 폴백 처리
-    try:
-        from utils_common import get_tem_sheet_name as _tem_name_local  # type: ignore
-    except Exception:
-        _tem_name_local = None
-    authorize_gspread = _auth_local
-    extract_sheet_id = _extract_local
-    get_tem_sheet_name = _tem_name_local
+    utils_mod = importlib.import_module("utils_common")
 except Exception as e:
     _last_import_error = e
 
-# item_creator.utils_common 폴백
-if authorize_gspread is None or extract_sheet_id is None:
+# (b) 직접 로드(파일 경로) 폴백
+if utils_mod is None:
     try:
-        from item_creator.utils_common import authorize_gspread as _auth_ic  # type: ignore
-        from item_creator.utils_common import extract_sheet_id as _extract_ic  # type: ignore
-        try:
-            from item_creator.utils_common import get_tem_sheet_name as _tem_name_ic  # type: ignore
-        except Exception:
-            _tem_name_ic = None
-        authorize_gspread = authorize_gspread or _auth_ic
-        extract_sheet_id = extract_sheet_id or _extract_ic
-        get_tem_sheet_name = get_tem_sheet_name or _tem_name_ic
+        utils_mod = _load_utils_direct()
     except Exception as e:
         _last_import_error = e
 
-# item_uploader.utils_common 최후 폴백
-if authorize_gspread is None or extract_sheet_id is None:
+# (c) item_creator.utils_common 폴백
+if utils_mod is None:
     try:
-        from item_uploader.utils_common import authorize_gspread as _auth_iu  # type: ignore
-        from item_uploader.utils_common import extract_sheet_id as _extract_iu  # type: ignore
-        try:
-            from item_uploader.utils_common import get_tem_sheet_name as _tem_name_iu  # type: ignore
-        except Exception:
-            _tem_name_iu = None
-        authorize_gspread = authorize_gspread or _auth_iu
-        extract_sheet_id = extract_sheet_id or _extract_iu
-        get_tem_sheet_name = get_tem_sheet_name or _tem_name_iu
+        utils_mod = importlib.import_module("item_creator.utils_common")  # type: ignore
     except Exception as e:
         _last_import_error = e
 
-if authorize_gspread is None or extract_sheet_id is None:
-    raise ImportError(
-        "authorize_gspread / extract_sheet_id 가져오기 실패. "
-        "프로젝트 루트 utils_common.py가 존재하는지 확인하세요."
-    ) from _last_import_error
+# (d) item_uploader.utils_common 폴백
+if utils_mod is None:
+    try:
+        utils_mod = importlib.import_module("item_uploader.utils_common")  # type: ignore
+    except Exception as e:
+        _last_import_error = e
 
-# TEM 시트명 유틸이 없으면 기본값 제공
+if utils_mod is None:
+    raise ImportError("No module named 'utils_common' (repo root에 utils_common.py가 있는지 확인)") from _last_import_error
+
+# 심볼 바인딩
+authorize_gspread = getattr(utils_mod, "authorize_gspread", None)
+extract_sheet_id   = getattr(utils_mod, "extract_sheet_id", None)
+get_tem_sheet_name = getattr(utils_mod, "get_tem_sheet_name", None)
+
+if authorize_gspread is None or extract_sheet_id is None:
+    raise ImportError("utils_common에서 authorize_gspread / extract_sheet_id를 찾을 수 없습니다.")
+
 if get_tem_sheet_name is None:
-    def get_tem_sheet_name() -> str:  # type: ignore
+    def get_tem_sheet_name() -> str:
         return "TEM_OUTPUT"
 
-# ---------------------------------------------------------------------
-# 2) 임포트 shim: creation_steps.py가 과거 경로를 임포트해도 통과
-# ---------------------------------------------------------------------
-# - creation_steps.py 최상단에서 'from item_uploader.utils_common import ...' 등을 수행하는
-#   레거시 코드를 고려해, 해당 경로를 로컬 utils_common에 매핑한다.
+# -----------------------------------------------------------------------------
+# 2) shim 주입: creation_steps의 레거시 경로(item_uploader.*)를 로컬 utils로 매핑
+# -----------------------------------------------------------------------------
 uploader_pkg = types.ModuleType("item_uploader")
-utils_mod = sys.modules.get("utils_common")
-if utils_mod is None:
-    # 방어: 혹시 위에서 로컬 임포트가 안 됐다면 실제 주입된 모듈을 찾아 등록
-    import importlib
-    utils_mod = importlib.import_module("utils_common")
-
 uploader_utils = types.ModuleType("item_uploader.utils_common")
-# 로컬 utils에서 필요한 심볼을 그대로 export
-for _name in ("authorize_gspread", "extract_sheet_id", "get_tem_sheet_name",
-              "open_creation_by_env", "ensure_worksheet", "join_url",
-              "choose_cover_key", "forward_fill_by_group", "safe_worksheet",
-              "with_retry"):
+for _name in (
+    "authorize_gspread", "extract_sheet_id", "get_tem_sheet_name",
+    "open_creation_by_env", "ensure_worksheet", "join_url",
+    "choose_cover_key", "forward_fill_by_group", "safe_worksheet", "with_retry"
+):
     if hasattr(utils_mod, _name):
         setattr(uploader_utils, _name, getattr(utils_mod, _name))
-
-# automation_steps.get_tem_sheet_name shim
 uploader_auto = types.ModuleType("item_uploader.automation_steps")
 setattr(uploader_auto, "get_tem_sheet_name", get_tem_sheet_name)
 
-# sys.modules에 주입
 sys.modules.setdefault("item_uploader", uploader_pkg)
 sys.modules["item_uploader.utils_common"] = uploader_utils
 sys.modules["item_uploader.automation_steps"] = uploader_auto
-
-# (선택) item_creator 경로도 동일하게 보정
-creator_pkg = types.ModuleType("item_creator")
-sys.modules.setdefault("item_creator", creator_pkg)
+# item_creator 경로도 동일하게 보정(로컬 utils 재사용)
+sys.modules.setdefault("item_creator", types.ModuleType("item_creator"))
 sys.modules["item_creator.utils_common"] = utils_mod  # 로컬 utils 재사용
 
-# ---------------------------------------------------------------------
-# 3) creation_steps 모듈 임포트
-#    - 이 모듈 안에 ShopeeCreator(impl)가 정의되어 있으며 run()->bool,
-#      get_tem_values_csv()->Optional[bytes] 를 제공한다.
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# 3) creation_steps 임포트 (여기서 레거시 import를 shim이 흡수)
+# -----------------------------------------------------------------------------
+_ImplCreator = None
 try:
     import creation_steps as _steps_mod
     _ImplCreator = getattr(_steps_mod, "ShopeeCreator", None)
 except Exception as e:
-    _ImplCreator = None
     _last_import_error = e
 
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # 4) 페이지 호환 컨트롤러 (래퍼)
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 class ShopeeCreator:
     """
-    페이지(3_Create Items.py)가 직접 사용하는 컨트롤러 (호환 래퍼).
-
-    - __init__ 인자와 run()/get_tem_values_csv() 시그니처를 페이지에 맞춤
-    - 내부적으로 creation_steps.ShopeeCreator(impl) 에 위임
-    - impl이 없더라도 친절한 에러를 반환 (ImportError 등)
+    - __init__(sheet_url, ref_url=None, cover_base_url=None, details_base_url=None,
+               option_base_url=None, shop_code=None, **kwargs)
+    - run() -> bool
+    - get_tem_values_csv() -> Optional[bytes]
     """
 
     def __init__(
@@ -171,7 +154,7 @@ class ShopeeCreator:
         self.sheet_url = sheet_url
         self.ref_url = ref_url
         self.cover_base_url = cover_base_url
-        self.details_base_url = details_base_url or None  # 페이지에선 details_base_url 키 사용
+        self.details_base_url = details_base_url
         self.option_base_url = option_base_url
         self.shop_code = shop_code
 
@@ -183,43 +166,23 @@ class ShopeeCreator:
                 for k in ("cover_base_url", "details_base_url", "option_base_url", "shop_code"):
                     setattr(self._impl, k, getattr(self, k))
             except Exception:
-                # impl 생성 실패 시에도 런타임에서 에러를 안내하도록 유지
                 self._impl = None
 
-    # ----------------------------------------------------------
-    # 실행
-    # ----------------------------------------------------------
     def run(self) -> bool:
-        """
-        전체 파이프라인 실행. success/fail bool 반환 (페이지 호환).
-        """
         if self._impl is None:
-            # impl 로드 실패 원인 안내
             raise ImportError(
-                "creation_steps 모듈 로드에 실패했습니다. "
-                "로컬 utils_common.py가 존재하고, 본 파일의 shim 등록이 수행되는지 확인하세요."
+                "creation_steps 모듈 로드 실패. utils_common 경로/파일 존재 및 본 컨트롤러(v2) 적용을 확인하세요."
             ) from _last_import_error
-        try:
-            return bool(self._impl.run())
-        except Exception:
-            # impl 내부 예외는 그대로 propagate 하되, 페이지에서 st.exception 으로 표시됨
-            raise
+        return bool(self._impl.run())
 
-    # ----------------------------------------------------------
-    # TEM_OUTPUT → CSV
-    # ----------------------------------------------------------
     def get_tem_values_csv(self) -> Optional[bytes]:
-        """
-        TEM_OUTPUT 시트를 CSV 바이트로 반환. (페이지 호환)
-        """
+        # impl이 제공하면 그대로 사용
         if self._impl and hasattr(self._impl, "get_tem_values_csv"):
             try:
                 return self._impl.get_tem_values_csv()
             except Exception:
-                # impl의 CSV 변환 실패 시 폴백 로직 시도
                 pass
-
-        # 폴백: 직접 시트에서 읽어 CSV 생성 (TEM 시트명 유틸 사용)
+        # 폴백: 직접 시트에서 읽어 CSV 생성
         try:
             import gspread
             gc = authorize_gspread()
@@ -229,8 +192,7 @@ class ShopeeCreator:
             if not values:
                 return None
             buf = io.StringIO()
-            writer = csv.writer(buf)
-            writer.writerows(values)
+            csv.writer(buf).writerows(values)
             return buf.getvalue().encode("utf-8-sig")
         except Exception:
             return None
