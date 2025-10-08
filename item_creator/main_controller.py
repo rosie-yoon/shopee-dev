@@ -2,177 +2,84 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import os
-import traceback
-from typing import Callable, Dict, Any, List, Optional
-
 import streamlit as st
-from gspread.exceptions import WorksheetNotFound
+import gspread
 
 from item_creator.utils_common import (
-    load_env,
-    open_creation_by_env,
-    open_ref_by_env,
-    with_retry,
-    safe_worksheet,
     get_env,
+    save_env_value,
     extract_sheet_id,
-    _authorize_and_open_by_key,  # type: ignore
+    authorize_gspread,
+)
+from .creation_steps import (
+    run_step_C1,
+    run_step_C2,
+    run_step_C4_prices,   # 신규: 가격 매핑
+    run_step_C5_images,   # 기존: 이미지 URL/Variation 복원
 )
 
-# 업로드 파이프라인의 공용 스텝 활용(규격/속성/가격/설명 등)
-import item_uploader.automation_steps as automation_steps
+class CreateItemsController:
+    def __init__(self):
+        self.gc: gspread.Client | None = None
+        self.sh: gspread.Spreadsheet | None = None
+        self.ref: gspread.Spreadsheet | None = None
 
-# 신규 생성 전용 스텝(템플릿 만들기/이미지 URL 매핑 등)
-try:
-    from item_creator import creation_steps
-except Exception:
-    creation_steps = None
+    # 필요시 호출: 세션/입력값은 이미 별도 페이지에서 저장해 둔 상태라고 가정
+    def _connect(self):
+        self.gc = authorize_gspread()
 
+        sheet_url = get_env("NEW_CREATE_SHEET_URL") or ""
+        ref_url   = get_env("REFERENCE_SHEET_URL") or ""
+        if not sheet_url or not ref_url:
+            raise RuntimeError("필수 URL이 비어 있습니다. (상품등록 시트/레퍼런스 시트)")
 
-class ShopeeCreator:
-    """
-    신규 아이템 업로드 템플릿을 생성하는 상위 컨트롤러.
+        self.sh  = self.gc.open_by_key(extract_sheet_id(sheet_url))
+        self.ref = self.gc.open_by_key(extract_sheet_id(ref_url))
 
-    - 생성 스프레드시트(sh): 사용자의 '상품등록(개인)' 시트
-    - ref 스프레드시트(ref): 공통 레퍼런스 시트(규격/규제/속성 등)
-    - creation_steps: TEM_OUTPUT 템플릿 생성, 이미지 URL 매핑 등
-    - automation_steps: 공용 규칙 채우기 / 최종 결과물 생성
-    """
+    def run(self):
+        st.subheader("실행")
 
-    def __init__(
-        self,
-        creation_spreadsheet_id: Optional[str] = None,
-        cover_base_url: str = "",
-        details_base_url: str = "",
-        option_base_url: str = "",
-        ref_spreadsheet_id: Optional[str] = None,
-    ):
-        """시트 연결 및 기본 파라미터 설정."""
-        try:
-            load_env()
+        # 실행에 필요한 값 로드 (이미 ‘입력 & 저장’ 단계에서 저장했다고 가정)
+        shop_code   = get_env("CREATE_SHOP_CODE") or ""
+        cover_base  = get_env("CREATE_COVER_BASE_URL") or ""
+        details_base= get_env("CREATE_DETAILS_BASE_URL") or ""
+        option_base = get_env("CREATE_OPTION_BASE_URL") or ""
 
-            # 생성 대상 시트
-            if creation_spreadsheet_id:
-                sid = extract_sheet_id(creation_spreadsheet_id) or creation_spreadsheet_id
-                self.sh = _authorize_and_open_by_key(sid)
-            else:
-                self.sh = open_creation_by_env()
+        # 기본 유효성 체크 (홈/입력 섹션에서 비활성화 이미 해두셨겠지만, 여기서도 한 번 더 방어)
+        missing = []
+        if not cover_base:   missing.append("Cover URL")
+        if not details_base: missing.append("Details URL")
+        if not option_base:  missing.append("Option URL")
+        if missing:
+            st.error("다음 항목이 비어 있습니다: " + ", ".join(missing))
+            return
 
-            # 레퍼런스 시트
-            if ref_spreadsheet_id:
-                rid = extract_sheet_id(ref_spreadsheet_id) or ref_spreadsheet_id
-                self.ref = _authorize_and_open_by_key(rid)
-            else:
-                self.ref = open_ref_by_env()
-
-        except Exception as e:
-            st.error(f"Google Sheets 연결에 실패했습니다: {e}")
-            st.stop()
-
-        # 이미지 베이스 URL & 샵 코드
-        self.cover_base_url = (cover_base_url or "").strip()
-        self.details_base_url = (details_base_url or "").strip()
-        self.option_base_url = (option_base_url or "").strip()
-        self.shop_code = get_env("SHOP_CODE", "").strip()
-
-    # ------------------------- 내부 유틸 -------------------------
-
-    def _initialize_failures_sheet(self) -> None:
-        """실행 오류/스킵 행을 쌓는 Failures 시트를 초기화."""
-        try:
-            failures_ws = safe_worksheet(self.sh, "Failures")
-            with_retry(lambda: failures_ws.clear())
-        except WorksheetNotFound:
-            failures_ws = with_retry(lambda: self.sh.add_worksheet(title="Failures", rows=1000, cols=16))
-
-        header = [["PID", "Category", "Name", "Reason", "Detail"]]
-        with_retry(lambda: failures_ws.update(values=header, range_name="A1:E1"))
-
-    @staticmethod
-    def _cb(progress_callback: Optional[Callable[[int, str], Any]], pct: int, msg: str) -> None:
-        """프로그레스 콜백이 있으면 안전하게 호출."""
-        if progress_callback:
+        if st.button("실행", type="primary", use_container_width=True, key="btn_create_run"):
             try:
-                progress_callback(pct, msg)
-            except Exception:
-                pass
+                self._connect()
 
-    # ------------------------- 실행 엔진 -------------------------
+                # C1: TEM_OUTPUT 초기화
+                run_step_C1(self.sh, self.ref)
 
-    def run(self, progress_callback: Optional[Callable[[int, str], Any]] = None) -> Dict[str, Any]:
-        """
-        전체 파이프라인 실행.
-        반환: {"download_path": str|None, "download_name": str|None, "logs": list[str]}
-        """
-        logs: List[str] = []
-        download_path: Optional[str] = None
-        download_name: Optional[str] = None
+                # C2: Collection → TEM_OUTPUT (A열 True / Variation 그룹 공란 자동 보정 포함)
+                run_step_C2(self.sh, self.ref)
 
-        try:
-            # Failures 초기화
-            self._cb(progress_callback, 5, "Failures 시트 초기화...")
-            self._initialize_failures_sheet()
-            logs.append("✅ Failures 초기화 완료")
+                # C4: (신규) 가격 매핑: MARGIN(A=SKU, E=소비자가) → TEM_OUTPUT('SKU Price')
+                run_step_C4_prices(self.sh)
 
-            # C1: TEM_OUTPUT 템플릿 생성
-            self._cb(progress_callback, 15, "Step C1: TEM_OUTPUT 템플릿 생성...")
-            if creation_steps is None:
-                raise RuntimeError("creation_steps 모듈이 없습니다. item_creator/creation_steps.py 를 생성하세요.")
-            creation_steps.run_step_C1(self.sh, self.ref)
-            logs.append("✅ C1 완료")
+                # C5: 이미지 URL 채우기 + Variation 복원
+                #     - Cover: (VIN 있으면 VIN, 아니면 SKU) + _C_{shop_code}.jpg
+                #     - Option: OptionBaseURL + SKU
+                #     - Details: DetailsBaseURL + (VIN or SKU) + _D1.._D{1~8}
+                run_step_C5_images(
+                    self.sh,
+                    shop_code=shop_code,
+                    cover_base_url=cover_base,
+                    details_base_url=details_base,
+                    option_base_url=option_base,
+                )
 
-            # C2: Collection → TEM_OUTPUT 매핑
-            self._cb(progress_callback, 35, "Step C2: Collection → TEM_OUTPUT 매핑...")
-            creation_steps.run_step_C2(self.sh, self.ref)
-            logs.append("✅ C2 완료")
+                st.success("템플릿 생성 완료! (C1→C2→C4→C5)")
 
-            # C3: Mandatory 기본값 채우기 (공용 스텝2)
-            self._cb(progress_callback, 50, "Step C3: Mandatory 기본값 채우기...")
-            automation_steps.run_step_2(self.sh, self.ref)
-            logs.append("✅ C3(=Step2) 완료")
-
-            # C4: 규제/기본속성/설명·가격 채우기 (공용 스텝3/4/5)
-            self._cb(progress_callback, 65, "Step C4: 규제/기본속성/설명·가격 채우기...")
-            automation_steps.run_step_3(self.sh, self.ref, overwrite=True)
-            automation_steps.run_step_4(self.sh, self.ref)
-            automation_steps.run_step_5(self.sh)  # ← 여기서 BASIC 시트를 참조함 (오류 발생 지점)
-            logs.append("✅ C4(=Step3/4/5) 완료")
-
-            # C5: 이미지 URL 생성(커버/상세/옵션)
-            self._cb(progress_callback, 80, "Step C5: 이미지 URL 생성(커버/상세/옵션)...")
-            creation_steps.run_step_C5_images(
-                sh=self.sh,
-                shop_code=self.shop_code,
-                cover_base_url=self.cover_base_url,
-                details_base_url=self.details_base_url,
-                option_base_url=self.option_base_url,
-            )
-            logs.append("✅ C5 완료")
-
-            # Step 7: 최종 결과 생성 및 다운로드 파일 경로 추출
-            self._cb(progress_callback, 92, "Step 7: 최종 결과 파일 생성...")
-            result7 = automation_steps.run_step_7(self.sh)
-            if isinstance(result7, dict):
-                download_path = result7.get("download_path")
-                download_name = result7.get("download_name")
-            elif isinstance(result7, (list, tuple)) and result7:
-                download_path = result7[0]
-                download_name = os.path.basename(download_path) if download_path else None
-            elif isinstance(result7, str):
-                download_path = result7
-                download_name = os.path.basename(download_path)
-            logs.append("✅ Step7 완료")
-
-            self._cb(progress_callback, 100, "완료!")
-
-        except Exception as e:
-            logs.append(f"❌ 오류: {e}")
-            st.error("실행 중 오류가 발생했습니다.")
-            st.code(traceback.format_exc())
-
-        return {
-            "download_path": download_path,
-            "download_name": download_name,
-            "logs": logs,
-        }
+            except Exception as e:
+                st.exception(e)
