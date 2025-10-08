@@ -5,14 +5,14 @@ from pathlib import Path
 import streamlit as st
 
 # --------------------------------------------------------------------
-# 1) 패키지 임포트용 경로 주입 (중요)
+# 1) 패키지 임포트 경로 주입
 # --------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 # --------------------------------------------------------------------
-# 2) 컨트롤러 안전 임포트
+# 2) 컨트롤러 임포트
 # --------------------------------------------------------------------
 try:
     from item_creator.main_controller import ShopeeCreator
@@ -22,8 +22,12 @@ except Exception as e:
     st.stop()
 
 # --------------------------------------------------------------------
-# 3) 레퍼런스 URL은 secrets에서만 로드 (값은 화면에 표시하지 않음)
-#    - 우선순위: REF_SHEET_URL > REF_URL > ref_url > refs.sheet_url
+# 3) 레퍼런스 URL은 secrets에서만 로드 (노출 금지)
+#    우선순위:
+#    1) REFERENCE_SPREADSHEET_ID  ← (권장) 시트 ID
+#       - ID가 'http'로 시작하면 그대로 URL로 간주
+#       - 그 외에는 ID로 판단해 URL로 변환
+#    2) (폴백) REF_SHEET_URL / REF_URL / ref_url / refs.sheet_url
 # --------------------------------------------------------------------
 def _get_ref_url_from_secrets() -> str | None:
     try:
@@ -31,7 +35,17 @@ def _get_ref_url_from_secrets() -> str | None:
     except Exception:
         return None
 
-    # 여러 키 패턴 지원
+    # 1) 권장: 시트 ID
+    sid = s.get("REFERENCE_SPREADSHEET_ID")
+    if sid:
+        sid = str(sid).strip()
+        # 혹시 URL을 넣어도 작동하도록 허용
+        if sid.startswith("http"):
+            return sid
+        # 순수 ID이면 URL로 변환
+        return f"https://docs.google.com/spreadsheets/d/{sid}/edit"
+
+    # 2) 폴백 키들(기존 호환)
     for v in (
         s.get("REF_SHEET_URL"),
         s.get("REF_URL"),
@@ -40,19 +54,20 @@ def _get_ref_url_from_secrets() -> str | None:
     ):
         if v:
             return str(v)
+
     return None
 
 REF_URL = _get_ref_url_from_secrets()
 
 # --------------------------------------------------------------------
-# 4) 페이지 설정 & 제목
+# 4) 페이지 설정 & 헤더
 # --------------------------------------------------------------------
 st.set_page_config(page_title="Create Template", layout="wide")
 st.title("Create Template")
 st.caption("‘상품등록’ 개인 시트 기반으로 신규 Mass Upload 템플릿을 생성합니다.")
 
 # --------------------------------------------------------------------
-# 5) 입력 폼 (사용자에겐 레퍼런스 URL 입력란을 노출하지 않음)
+# 5) 입력 폼 (레퍼런스 URL은 비노출)
 # --------------------------------------------------------------------
 c1, c2 = st.columns([1, 1])
 
@@ -66,9 +81,9 @@ cover_url   = st.text_input("Cover base URL (필수)",   placeholder="https://ex
 details_url = st.text_input("Details base URL (필수)", placeholder="https://example.com/details/")
 option_url  = st.text_input("Option base URL (필수)",  placeholder="https://example.com/options/")
 
-# 레퍼런스 URL이 없으면 실행 비활성화 + 경고
 if not REF_URL:
-    st.warning("레퍼런스 시트 URL이 secrets에 설정되어 있지 않습니다. 관리자에게 문의하세요. (예: REF_SHEET_URL)")
+    st.warning("`secrets`에 레퍼런스 시트 ID가 없습니다. `.streamlit/secrets.toml`에 "
+               "`REFERENCE_SPREADSHEET_ID = \"<스프레드시트 ID>\"` 를 설정해 주세요.")
 all_filled = all([shop_code, sheet_url, cover_url, details_url, option_url, REF_URL is not None])
 
 st.divider()
@@ -79,7 +94,7 @@ st.divider()
 run_disabled = not all_filled
 if st.button("실행", type="primary", use_container_width=True, disabled=run_disabled):
     try:
-        ctl = ShopeeCreator(sheet_url=sheet_url, ref_url=REF_URL)  # ← 사용자 입력 대신 secrets 사용
+        ctl = ShopeeCreator(sheet_url=sheet_url, ref_url=REF_URL)
         ok = ctl.run(
             shop_code=shop_code,
             cover_base_url=cover_url,
@@ -91,7 +106,7 @@ if st.button("실행", type="primary", use_container_width=True, disabled=run_di
         else:
             st.success("생성 완료! TEM_OUTPUT 시트를 확인하세요.")
 
-            # CSV 내려받기 (값 자체는 노출 X)
+            # TEM_OUTPUT CSV 내려받기
             try:
                 csv_bytes = ctl.get_tem_values_csv()
                 if csv_bytes:
