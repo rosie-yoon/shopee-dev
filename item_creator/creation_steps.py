@@ -596,9 +596,12 @@ class ShopeeCreator:
     # ----------------------------------------------------------
 
     # [수정] main_controller의 get_tem_values_csv() 폴백을 우회하기 위해 함수명을 변경합니다.
-    def get_tem_values_for_csv_fallback(self) -> Optional[bytes]:
-        """TEM_OUTPUT 시트를 CSV 바이트로 반환 (PID 제거 및 Category 정규화는 XLSX에서 처리)"""
-        # CSV 폴백 로직은 PID 제거 및 Category 정규화 로직을 유지합니다. (자동 배포된 CSV 파일에 적용)
+    # [재수정] main_controller가 이 함수를 사용하도록 함수명을 get_tem_values_csv로 되돌립니다.
+    def get_tem_values_csv(self) -> Optional[bytes]:
+        """
+        [main_controller가 사용하는 공식 CSV 다운로드 함수]
+        - A열 PID 제거 및 Category 정규화 로직이 포함된 최신 버전입니다.
+        """
         if not self.sh:
             return None
 
@@ -612,13 +615,14 @@ class ShopeeCreator:
             current_headers = None
             
             for row in vals:
+                # 헤더 행 탐지 (두 번째 열이 'Category')
                 if (row[1] if len(row) > 1 else "").strip().lower() == "category":
                     current_headers = row[1:]
                     processed_vals.append(current_headers) # PID 제거된 헤더 추가
                     continue
 
                 if current_headers and len(row) > 1:
-                    # 데이터 행: PID 제거
+                    # 데이터 행: A열 PID 제거
                     data_row = row[1:]
                     
                     # Category 형식 정규화 (PID 제거 후 첫 번째 열)
@@ -628,7 +632,7 @@ class ShopeeCreator:
                         
                     processed_vals.append(data_row)
                 elif len(row) > 0:
-                    # 헤더 행이 아니지만 PID가 있는 경우(예: PID만 있는 빈 행) PID 제거 시도
+                    # 헤더 행이 아닌 경우 PID 제거 시도 (안전 장치)
                     processed_vals.append(row[1:])
 
             if not processed_vals:
@@ -637,6 +641,7 @@ class ShopeeCreator:
             buf = io.StringIO()
             writer = csv.writer(buf)
             writer.writerows(processed_vals)
+            # UTF-8 BOM 시그니처를 포함하여 반환
             return buf.getvalue().encode("utf-8-sig")
         except Exception as e:
             print(f"[WARN] TEM_OUTPUT CSV 변환 실패: {e}")
