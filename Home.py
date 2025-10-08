@@ -69,7 +69,7 @@ st.markdown(
       div.stButton > button{
         width:100% !important; padding:12px 16px !important; border-radius:12px !important;
         font-weight:800 !important; font-size:1.05rem !important; border:none !important;
-        color:#FFFFFF !important;
+        color:#1E293B !important;
         background: linear-gradient(90deg,#93C5FD,#67E8F9) !important;
         box-shadow:0 10px 15px -3px rgba(59,130,246,.5),0 4px 6px -2px rgba(59,130,246,.05) !important;
         transition: transform .15s ease; margin-top:8px;
