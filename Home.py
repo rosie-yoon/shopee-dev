@@ -81,3 +81,4 @@ else:
     st.page_link("pages/3_Create Items.py", label="🧩 Create New Items", use_container_width=True)
 
 st.caption(f"Version: {__APP_VERSION__}")
+
