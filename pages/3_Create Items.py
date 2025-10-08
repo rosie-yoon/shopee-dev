@@ -172,3 +172,5 @@ if run_btn:
     except Exception as e:
         st.error("실행 중 오류가 발생했습니다.")
         st.code(traceback.format_exc())
+
+apply_theme(hide_sidebar=False, components_glass=True)
