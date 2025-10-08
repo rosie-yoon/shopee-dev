@@ -1,84 +1,127 @@
-# Home.py (final)
+# Home.py
+# -*- coding: utf-8 -*-
 import streamlit as st
+from pathlib import Path
 
-__APP_VERSION__ = "v3"
-
+# --------------------------------------------------------------------
+# 기본 설정
+# --------------------------------------------------------------------
 st.set_page_config(
-    page_title="Shopee Support",
-    page_icon="🌐",
+    page_title="Shopee Support Tools",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-st.markdown("""
-<style>
-:root{
-  --btn-bg: #2563EB;
-  --btn-bg-hover: #1D4ED8;
-  --btn-fg: #FFFFFF;
-  --btn-radius: 14px;
-  --btn-pad: 18px 24px;
-  --btn-shadow: 0 8px 20px rgba(37,99,235,.20);
-  --btn-font-size: 30px;
+# --------------------------------------------------------------------
+# 아이콘 경로
+# --------------------------------------------------------------------
+ICON_DIR = Path("assets/icons")
+ICONS = {
+    "cover":  ICON_DIR / "cover@3x.png",
+    "copy":   ICON_DIR / "copy@3x.png",
+    "create": ICON_DIR / "create@3x.png",
 }
-.stButton > button{
-  background: var(--btn-bg) !important;
-  color: var(--btn-fg) !important;
-  border: 0 !important;
-  border-radius: var(--btn-radius) !important;
-  padding: var(--btn-pad) !important;
-  font-weight: 700 !important;
-  letter-spacing: .2px;
-  height: auto !important;
-  box-shadow: var(--btn-shadow);
-  transition: transform .12s ease, filter .12s ease, background-color .12s ease;
-  font-size: var(--btn-font-size) !important;
-  line-height: 1.2 !important;
-}
-.stButton > button:hover{
-  background: var(--btn-bg-hover) !important;
-  transform: translateY(-1px);
-  filter: brightness(1.02);
-}
-.stButton > button:active{
-  transform: translateY(0) scale(.99);
-}
-@media (min-width: 1200px){
-  .stButton > button{ font-size: 22px !important; }
-}
-</style>
-""", unsafe_allow_html=True)
 
-st.title("🌐 Shopee Support Tools")
-st.info(
-    "Cover Image : 썸네일로 사용할 커버 이미지를 생성하는 메뉴입니다.\n\n"
-    "Copy Template : 샵 복제 시 사용할 Mass Upload 파일을 생성하는 메뉴입니다.\n\n"
-    "Create New Items : ‘상품등록’ 개인 시트를 기반으로 신규 아이템 업로드 템플릿을 생성합니다."
+# --------------------------------------------------------------------
+# 스타일 (Glassmorphism + 버튼 통일)
+# --------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+      html, body, [data-testid="stAppViewContainer"]{
+        background: linear-gradient(135deg,#1E293B 0%, #334155 100%);
+        color: #fff;
+        font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, 'Noto Sans';
+      }
+      [data-testid="stHeader"]{ background: rgba(30,41,59,.8); }
+      h1, h2, h3, h4 { color: #fff; }
+
+      .glass-card{
+        background: rgba(255,255,255,.08);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border-radius: 16px;
+        padding: 22px;
+        min-height: 250px;
+        box-shadow: 0 4px 18px rgba(0,0,0,.25),
+                    inset 0 0 0 1px rgba(255,255,255,.05);
+        transition: background .25s ease;
+      }
+      .glass-card:hover{ background: rgba(255,255,255,.12); }
+
+      div.stButton > button{
+        width: 100% !important;
+        padding: 12px 16px !important;
+        border-radius: 12px !important;
+        font-weight: 800 !important;
+        font-size: 1.05rem !important;
+        border: none !important;
+        color: #1E293B !important;
+        background: linear-gradient(90deg,#93C5FD,#67E8F9) !important;
+        box-shadow: 0 10px 15px -3px rgba(59,130,246,.5),
+                    0 4px 6px -2px rgba(59,130,246,.05) !important;
+        transition: transform .15s ease;
+      }
+      div.stButton > button:hover { transform: translateY(-1px); }
+      div.stButton > button:active { transform: scale(.98); }
+
+      .card-title{ margin: 6px 0 8px; font-weight: 800; font-size: 1.25rem; }
+      .card-desc{ margin: 0 0 14px; color: rgba(255,255,255,.75); }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
+# --------------------------------------------------------------------
+# 카드 데이터
+# --------------------------------------------------------------------
+cards = [
+    {
+        "icon": ICONS["cover"],
+        "title": "Cover Image",
+        "desc": "썸네일로 사용할 커버 이미지 생성",
+        "path": "pages/1_Cover Image.py",
+        "key": "card_cover",
+    },
+    {
+        "icon": ICONS["copy"],
+        "title": "Copy Template",
+        "desc": "복제용 Mass Upload 템플릿 생성",
+        "path": "pages/2_Copy Template.py",
+        "key": "card_copy",
+    },
+    {
+        "icon": ICONS["create"],
+        "title": "Create Template",
+        "desc": "신규 상품 Mass Upload 템플릿 생성",
+        "path": "pages/3_Create Items.py",
+        "key": "card_create",
+    },
+]
+
+# --------------------------------------------------------------------
+# 3열 레이아웃 카드 렌더
+# --------------------------------------------------------------------
+cols = st.columns(3)
+for col, c in zip(cols, cards):
+    with col:
+        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+
+        # 아이콘
+        if Path(c["icon"]).exists():
+            st.image(str(c["icon"]), width=48)
+
+        # 텍스트
+        st.markdown(f'<div class="card-title">{c["title"]}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="card-desc">{c["desc"]}</div>', unsafe_allow_html=True)
+
+        # 버튼 (신버전: switch_page, 구버전: page_link)
+        if hasattr(st, "switch_page"):
+            if st.button("시작하기", use_container_width=True, key=c["key"]):
+                st.switch_page(c["path"])
+        else:
+            st.page_link(c["path"], label="시작하기")  # use_container_width 제거
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
 st.divider()
-
-col1, col2 = st.columns(2)
-with col1:
-    if hasattr(st, "switch_page"):
-        if st.button("Cover Image", use_container_width=True, key="btn_cover"):
-            st.switch_page("pages/1_Cover Image.py")
-    else:
-        st.page_link("pages/1_Cover Image.py", label="Cover Image", use_container_width=True)
-
-with col2:
-    if hasattr(st, "switch_page"):
-        if st.button("Copy Template", use_container_width=True, key="btn_copy"):
-            st.switch_page("pages/2_Copy Template.py")
-    else:
-        st.page_link("pages/2_Copy Template.py", label="Copy Template", use_container_width=True)
-
-st.divider()
-if hasattr(st, "switch_page"):
-    if st.button("🧩 Create New Items", use_container_width=True, key="btn_create"):
-        st.switch_page("pages/3_Create Items.py")
-else:
-    st.page_link("pages/3_Create Items.py", label="🧩 Create New Items", use_container_width=True)
-
-st.caption(f"Version: {__APP_VERSION__}")
-
+st.caption("Version: v3")
