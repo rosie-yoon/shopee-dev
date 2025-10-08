@@ -108,21 +108,51 @@ if st.button("실행", type="primary", use_container_width=True, disabled=run_di
         else:
             st.success("생성 완료! TEM_OUTPUT 시트를 확인하세요.")
 
-            # TEM_OUTPUT CSV 내려받기
+            # TEM_OUTPUT XLSX 내려받기 (최신 로직 사용)
             try:
-                csv_bytes = ctl.get_tem_values_csv()
-                if csv_bytes:
+                # [수정] XLSX 다운로드 메서드 호출
+                xlsx_io = ctl.get_tem_values_xlsx() 
+                if xlsx_io:
+                    # 'io' 객체에서 BytesIO를 추출 (main_controller가 이 구조를 가정함)
+                    xlsx_bytes = xlsx_io.getvalue()
+
                     st.download_button(
-                        label="TEM_OUTPUT 내려받기 (CSV)",
-                        data=csv_bytes,
-                        file_name=f"{shop_code}_TEM_OUTPUT.csv",
-                        mime="text/csv",
+                        label="TEM_OUTPUT 내려받기 (XLSX)",
+                        data=xlsx_bytes,
+                        file_name=f"{shop_code}_TEM_OUTPUT.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True,
                     )
                 else:
-                    st.info("CSV 데이터가 비어 있습니다. TEM_OUTPUT 시트를 확인해 주세요.")
-            except Exception as csv_err:
-                st.warning(f"CSV 생성 중 오류: {csv_err}")
+                    # XLSX 생성 실패 시 CSV 폴백 로직 시도
+                    csv_bytes = ctl.get_tem_values_csv()
+                    if csv_bytes:
+                        st.download_button(
+                            label="TEM_OUTPUT 내려받기 (CSV - 폴백)",
+                            data=csv_bytes,
+                            file_name=f"{shop_code}_TEM_OUTPUT.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
+                    else:
+                        st.info("다운로드 데이터가 비어 있습니다. TEM_OUTPUT 시트를 확인해 주세요.")
+            except Exception as download_err:
+                st.warning(f"파일 생성 중 오류: {download_err}")
+                
+                # 원본 CSV 폴백 로직 유지 (메인 컨트롤러가 get_tem_values_csv()를 호출할 경우)
+                try:
+                    csv_bytes = ctl.get_tem_values_csv()
+                    if csv_bytes:
+                        st.download_button(
+                            label="TEM_OUTPUT 내려받기 (CSV - 폴백)",
+                            data=csv_bytes,
+                            file_name=f"{shop_code}_TEM_OUTPUT.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
+                except Exception:
+                    pass
+
 
     except Exception as e:
         st.exception(e)
