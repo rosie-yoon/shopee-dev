@@ -114,12 +114,6 @@ cards = [
         "path": "pages/1_Cover Image.py",
     },
     {
-        "icon": ICONS["copy"],
-        "title": "Copy Template",
-        "desc": "복제용 Mass Upload 템플릿 생성",
-        "path": "pages/2_Copy Template.py",
-    },
-    {
         "icon": ICONS["create"],
         "title": "Create Template",
         "desc": "신규 상품 Mass Upload 템플릿 생성",
