@@ -94,13 +94,15 @@ st.divider()
 run_disabled = not all_filled
 if st.button("실행", type="primary", use_container_width=True, disabled=run_disabled):
     try:
-        ctl = ShopeeCreator(sheet_url=sheet_url, ref_url=REF_URL)
-        ok = ctl.run(
-            shop_code=shop_code,
+        ctl = ShopeeCreator(
+            sheet_url=sheet_url,
+            ref_url=REF_URL,
             cover_base_url=cover_url,
             details_base_url=details_url,
             option_base_url=option_url,
+            shop_code=shop_code,
         )
+        ok = ctl.run()
         if not ok:
             st.error("실행 중 문제가 발생했습니다. Failures 시트를 확인하세요.")
         else:
