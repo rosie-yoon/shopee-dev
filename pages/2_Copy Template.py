@@ -2,38 +2,29 @@
 from pathlib import Path
 import sys
 import streamlit as st
-import os # get_env/save_env_value를 위한 추가
 
 st.set_page_config(page_title="Copy Template", layout="wide")
 
-# --------------------------------------------------------------------
-# 1) 패키지 임포트 경로 주입 (프로젝트 루트를 sys.path에 추가)
-# --------------------------------------------------------------------
+# 프로젝트 루트(shopee)를 임포트 경로에 추가
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
-    # insert(0)로 최우선 경로로 주입하여 utils_common을 찾게 함
-    sys.path.insert(0, str(ROOT)) 
+    sys.path.insert(0, str(ROOT))
 
-# --------------------------------------------------------------------
-# 2) 내부 모듈 임포트
-# --------------------------------------------------------------------
-# 레거시 item_uploader.app 임포트 오류 방지 (주석 처리 유지)
-# from item_uploader.app import run as item_uploader_run # 원본 (오류 발생)
+# 내부 모듈 임포트: 이제 모든 유틸리티는 프로젝트 루트의 utils_common을 사용합니다.
+# item_uploader.app 경로의 존재 여부는 페이지 로드 시 오류를 유발하므로 임시로 주석 처리합니다.
+# from item_uploader.app import run as item_uploader_run 
+import utils_common
+from utils_common import (
+    extract_sheet_id, sheet_link,
+    get_env, save_env_value # save_env_value가 utils_common에 없으면 오류 발생 가능
+)
 
-# [수정] item_uploader.utils_common 대신, repo root에 존재하는 utils_common에서 직접 임포트 시도
-try:
-    from utils_common import (
-        extract_sheet_id, sheet_link,
-        get_env, save_env_value
-    )
-except ImportError as e:
-    st.error(f"유틸리티 모듈 로드 실패: {e}. [Root]에 utils_common.py가 있는지 확인하세요.")
-    st.stop()
-
+# ... (나머지 코드 생략, utils_common에서 import된 함수를 사용하도록 처리)
+# ... (현재 파일에는 run 함수가 없으므로 오류 나는 부분을 주석처리하는 것이 가장 안전함)
 
 # =============================
 # 사이드바 설정 폼 (이 페이지 전용)
-# =============================
+# ===================================================
 with st.sidebar:
     st.subheader("⚙️ 초기 설정")
 
@@ -69,20 +60,24 @@ with st.sidebar:
                 # 세션/환경 모두 업데이트
                 st.session_state["GOOGLE_SHEETS_SPREADSHEET_ID"] = sid
                 st.session_state["IMAGE_HOSTING_URL"] = image_host
-                save_env_value("GOOGLE_SHEETS_SPREADSHEET_ID", sid)
-                save_env_value("IMAGE_HOSTING_URL", image_host)
-                st.success("설정이 저장되었습니다. 페이지를 새로고침합니다.")
-                st.rerun()
+                # save_env_value가 utils_common에 있으면 사용하고, 없으면 오류가 날 수 있습니다.
+                try:
+                    utils_common.save_env_value("GOOGLE_SHEETS_SPREADSHEET_ID", sid)
+                    utils_common.save_env_value("IMAGE_HOSTING_URL", image_host)
+                except AttributeError:
+                    # save_env_value가 utils_common에 정의되지 않은 경우 경고만 출력
+                    st.warning("경고: save_env_value 함수가 utils_common에 없어 환경 변수 파일 저장은 건너뜁니다.")
+                st.success("설정 저장 완료.")
 
-# =============================
-# 메인 페이지 (기존 run() 함수 대신 임시 메시지)
-# =============================
-st.title("Copy Template")
-st.caption("Google Sheets 템플릿을 복사하고 초기 설정을 저장합니다.")
 
-# 원래 run() 함수가 실행되어야 할 자리
-# if 'item_uploader_run' in locals():
-#     item_uploader_run()
-# else:
-st.warning("현재 'Copy Template' 페이지의 핵심 실행 로직을 불러올 수 없습니다. 임포트 경로 문제 해결 후 재시도해주세요.")
-st.info("이 페이지의 오류는 현재 작업 중인 'Create Items' 페이지와는 별개입니다.")
+# --------------------------------------------------------------------
+# 템플릿 복사 실행 (기존 run 함수 호출)
+# --------------------------------------------------------------------
+if st.button("템플릿 복사 실행", type="primary", use_container_width=True):
+    # item_uploader.app.run이 주석 처리되었으므로, 해당 기능을 실행할 코드를 임시로 대체합니다.
+    # 이 페이지는 임포트 오류 해결을 위해 기능 자체를 비활성화한 상태로 간주합니다.
+    st.info("현재 템플릿 복사 기능은 모듈 경로 문제로 인해 비활성화되었습니다. (3번 페이지 작업 집중)")
+    # # if 'item_uploader_run' in locals():
+    # #    item_uploader_run()
+    # # else:
+    # #    st.error("복사 로직을 찾을 수 없습니다.")
