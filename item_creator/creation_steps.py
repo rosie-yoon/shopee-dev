@@ -10,14 +10,14 @@ from gspread.cell import Cell
 from gspread.utils import rowcol_to_a1
 from gspread.exceptions import WorksheetNotFound
 
-# 공용 유틸(헤더 정규화, 카테고리 상위, TEM 이름, 인덱스 탐색, 시트/리트라이)
-from item_uploader.automation_steps import (
+# [수정] 공용 유틸리티는 main_controller.py의 shimming에 따라 item_uploader.utils_common에서 가져옵니다.
+from item_uploader.utils_common import (
     header_key, top_of_category, get_tem_sheet_name,
     _find_col_index, with_retry, safe_worksheet,
 )
 # 신규 생성 공용 유틸 (env, URL join, Variation 그룹 forward-fill 등)
 from item_creator.utils_common import get_env, join_url, forward_fill_by_group
-# ShopeeCreator 클래스에서 사용하는 gspread 유틸 (main_controller가 이 파일을 _ImplCreator로 사용하기 위함)
+# ShopeeCreator 클래스에서 사용하는 gspread 유틸
 from item_uploader.utils_common import authorize_gspread, extract_sheet_id
 
 
