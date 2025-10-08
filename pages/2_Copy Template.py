@@ -2,29 +2,34 @@
 from pathlib import Path
 import sys
 import streamlit as st
+import os # get_env/save_env_value를 위한 추가
 
 st.set_page_config(page_title="Copy Template", layout="wide")
 
-# 프로젝트 루트(shopee)를 임포트 경로에 추가
+# --------------------------------------------------------------------
+# 1) 패키지 임포트 경로 주입 (프로젝트 루트를 sys.path에 추가)
+# --------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+    # insert(0)로 최우선 경로로 주입하여 utils_common을 찾게 함
+    sys.path.insert(0, str(ROOT)) 
 
-# 내부 모듈 임포트
-# [수정 시작] item_uploader.app 대신, 레거시 컨트롤러 역할을 하는 모듈에서 run 함수를 가져오는 것으로 추정
-# item_uploader 패키지 구조가 불분명하므로, 임시로 automation_steps에서 가져오거나 주석 처리할 수 있습니다.
-# 여기서는 오류가 나는 모듈 대신, 현재 존재하는 item_creator.main_controller의 ShopeeCreator를 가져와 페이지를 로드합니다.
-# NOTE: 실제로 run 함수가 필요한지는 불분명하므로, 임포트만 해제하여 페이지 로드를 가능하게 합니다.
+# --------------------------------------------------------------------
+# 2) 내부 모듈 임포트
+# --------------------------------------------------------------------
+# 레거시 item_uploader.app 임포트 오류 방지 (주석 처리 유지)
 # from item_uploader.app import run as item_uploader_run # 원본 (오류 발생)
 
-# 만약 item_uploader 페이지도 run() 함수를 필요로 한다면, 
-# from item_uploader.automation_steps import run as item_uploader_run
-# 가 필요하지만, 현재는 페이지 로드 오류 해결이 우선이므로 임포트를 삭제합니다.
+# [수정] item_uploader.utils_common 대신, repo root에 존재하는 utils_common에서 직접 임포트 시도
+try:
+    from utils_common import (
+        extract_sheet_id, sheet_link,
+        get_env, save_env_value
+    )
+except ImportError as e:
+    st.error(f"유틸리티 모듈 로드 실패: {e}. [Root]에 utils_common.py가 있는지 확인하세요.")
+    st.stop()
 
-from item_uploader.utils_common import (
-    extract_sheet_id, sheet_link,
-    get_env, save_env_value
-)
 
 # =============================
 # 사이드바 설정 폼 (이 페이지 전용)
