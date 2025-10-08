@@ -377,7 +377,7 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet):
 
 class ShopeeCreator:
     """
-    신규 상품 템플릿 생성 파이프라인 컨트롤러. (main_controller.py의 _ImplCreator)
+    [V_20251009_FINAL_DOWNLOAD_FIX] 신규 상품 템플릿 생성 파이프라인 컨트롤러. (main_controller.py의 _ImplCreator)
     """
 
     def __init__(self, sheet_url: str, ref_url: Optional[str] = None) -> None:
