@@ -60,8 +60,6 @@ with st.sidebar:
                 st.success("설정이 저장되었습니다!")
                 st.rerun()
 
-apply_theme(hide_sidebar=False, components_glass=True)
-
 # ==============================
 # 메인 실행
 # ==============================
