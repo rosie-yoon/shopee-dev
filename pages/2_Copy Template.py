@@ -11,8 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # 내부 모듈 임포트
-# [수정] 레거시 item_uploader.app 임포트 제거 (오류 원인)
-# [수정] 레거시 item_uploader.utils_common 대신 루트 utils_common 사용 (오류 원인)
+# [수정] 레거시 item_uploader 경로를 모두 제거하고 루트 utils_common 사용
 import utils_common
 from utils_common import (
     extract_sheet_id, sheet_link,
@@ -20,13 +19,10 @@ from utils_common import (
 )
 
 # ===============================
-# 페이지 실행 함수 (주석 처리된 run 함수를 호출할 수 있도록 유지)
+# 페이지 실행 함수 (레거시 item_uploader.app.run 호출 로직 제거)
 # ===============================
 try:
-    # 2번 페이지의 실제 로직은 item_uploader 내부에 있다고 가정하고,
-    # 해당 모듈을 로드하여 실행합니다. (현재는 로드만 시도하고 오류 발생 방지)
-    # import item_uploader.main_controller as item_uploader_controller
-    # item_uploader_controller.run()
+    # 레거시 item_uploader.app 임포트 및 실행 로직을 제거하고 오류 방지
     pass
 except Exception:
     pass
@@ -50,7 +46,7 @@ with st.sidebar:
     with st.form("settings_form_copy_template"):
         sheet_url = st.text_input(
             "Google Sheets URL",
-            value=sheet_link(cur_sid) if cur_sid else "",
+            value=utils_common.sheet_link(cur_sid) if cur_sid else "",
             placeholder="https://docs.google.com/spreadsheets/d/...",
         )
         image_host = st.text_input(
@@ -60,7 +56,7 @@ with st.sidebar:
         )
         submitted = st.form_submit_button("저장")
         if submitted:
-            sid = extract_sheet_id(sheet_url)
+            sid = utils_common.extract_sheet_id(sheet_url)
             if not sid:
                 st.error("올바른 Google Sheets URL을 입력해주세요.")
             elif not image_host or not image_host.startswith(("http://", "https://")):
@@ -69,7 +65,7 @@ with st.sidebar:
                 # 세션/환경 모두 업데이트
                 st.session_state["GOOGLE_SHEETS_SPREADSHEET_ID"] = sid
                 st.session_state["IMAGE_HOSTING_URL"] = image_host
-                save_env_value("GOOGLE_SHEETS_SPREADSHEET_ID", sid)
-                save_env_value("IMAGE_HOSTING_URL", image_host)
+                utils_common.save_env_value("GOOGLE_SHEETS_SPREADSHEET_ID", sid)
+                utils_common.save_env_value("IMAGE_HOSTING_URL", image_host)
                 st.success("설정이 저장되었습니다.")
                 st.experimental_rerun()
