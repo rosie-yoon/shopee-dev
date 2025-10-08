@@ -1,205 +1,236 @@
-# item_creator/main_controller.py
 # -*- coding: utf-8 -*-
+"""
+main_controller.py  (A안: 페이지와 100% 호환 + 의존 경로 완화 + 무수정 동작)
+
+목표
+- Streamlit 페이지(pages/3_Create Items.py)가 기대하는 인터페이스와 정확히 일치
+  - 클래스명: ShopeeCreator
+  - __init__(sheet_url, ref_url=None, cover_base_url=None, details_base_url=None,
+             option_base_url=None, shop_code=None, **kwargs)
+  - run() -> bool
+  - get_tem_values_csv() -> Optional[bytes]
+- 외부 패키지 경로(item_uploader.*, item_creator.*)에 묶이지 않도록 안전한 임포트/폴백
+  - 로컬 utils_common.py를 우선 사용
+  - creation_steps.py가 과거 경로를 임포트하더라도, 런타임 shim으로 해결
+
+동작 개요
+- (1) utils_common 임포트: 로컬 > item_creator.utils_common > item_uploader.utils_common
+- (2) shim 등록: creation_steps가 과거 경로를 임포트해도 통과되도록
+- (3) creation_steps 모듈 임포트 후, 내부 ShopeeCreator를 위임 객체(impl)로 사용
+- (4) 페이지가 넘겨준 base URL / shop_code는 impl에 동일 이름 속성으로 주입(존재 유무 무관)
+
+※ 다른 파일은 수정하지 않아도 됩니다.
+"""
+
 from __future__ import annotations
 
-from typing import Optional, Dict, Any, List, Callable, Tuple
+from typing import Optional, Tuple
+import sys
+import types
 import io
 import csv
-import traceback
-
-import gspread
-from gspread.exceptions import WorksheetNotFound
 
 # ---------------------------------------------------------------------
-# (안전) URL → Sheet ID 추출 유틸: item_creator → item_uploader → 폴백
+# 1) 안전한 utils 임포트 (로컬 우선)
 # ---------------------------------------------------------------------
+_last_import_error = None
+
+authorize_gspread = None
+extract_sheet_id = None
+get_tem_sheet_name = None
+
+# 로컬 utils_common.py 우선
 try:
-    from item_creator.utils_common import extract_sheet_id  # 있으면 사용
-except Exception:
+    from utils_common import authorize_gspread as _auth_local
+    from utils_common import extract_sheet_id as _extract_local
+    # get_tem_sheet_name 이 없을 수도 있어 폴백 처리
     try:
-        from item_uploader.utils_common import extract_sheet_id  # 검증된 경로
+        from utils_common import get_tem_sheet_name as _tem_name_local  # type: ignore
     except Exception:
-        import re
-        def extract_sheet_id(url_or_id: str | None) -> str:
-            if not url_or_id:
-                return ""
-            s = str(url_or_id).strip()
-            if s.startswith("http"):
-                m = re.search(r"/spreadsheets/d/([a-zA-Z0-9\-_]+)", s)
-                return m.group(1) if m else s
-            return s  # 이미 ID인 경우 그대로
+        _tem_name_local = None
+    authorize_gspread = _auth_local
+    extract_sheet_id = _extract_local
+    get_tem_sheet_name = _tem_name_local
+except Exception as e:
+    _last_import_error = e
+
+# item_creator.utils_common 폴백
+if authorize_gspread is None or extract_sheet_id is None:
+    try:
+        from item_creator.utils_common import authorize_gspread as _auth_ic  # type: ignore
+        from item_creator.utils_common import extract_sheet_id as _extract_ic  # type: ignore
+        try:
+            from item_creator.utils_common import get_tem_sheet_name as _tem_name_ic  # type: ignore
+        except Exception:
+            _tem_name_ic = None
+        authorize_gspread = authorize_gspread or _auth_ic
+        extract_sheet_id = extract_sheet_id or _extract_ic
+        get_tem_sheet_name = get_tem_sheet_name or _tem_name_ic
+    except Exception as e:
+        _last_import_error = e
+
+# item_uploader.utils_common 최후 폴백
+if authorize_gspread is None or extract_sheet_id is None:
+    try:
+        from item_uploader.utils_common import authorize_gspread as _auth_iu  # type: ignore
+        from item_uploader.utils_common import extract_sheet_id as _extract_iu  # type: ignore
+        try:
+            from item_uploader.utils_common import get_tem_sheet_name as _tem_name_iu  # type: ignore
+        except Exception:
+            _tem_name_iu = None
+        authorize_gspread = authorize_gspread or _auth_iu
+        extract_sheet_id = extract_sheet_id or _extract_iu
+        get_tem_sheet_name = get_tem_sheet_name or _tem_name_iu
+    except Exception as e:
+        _last_import_error = e
+
+if authorize_gspread is None or extract_sheet_id is None:
+    raise ImportError(
+        "authorize_gspread / extract_sheet_id 가져오기 실패. "
+        "프로젝트 루트 utils_common.py가 존재하는지 확인하세요."
+    ) from _last_import_error
+
+# TEM 시트명 유틸이 없으면 기본값 제공
+if get_tem_sheet_name is None:
+    def get_tem_sheet_name() -> str:  # type: ignore
+        return "TEM_OUTPUT"
 
 # ---------------------------------------------------------------------
-# (안전) gspread 인증 유틸
+# 2) 임포트 shim: creation_steps.py가 과거 경로를 임포트해도 통과
+# ---------------------------------------------------------------------
+# - creation_steps.py 최상단에서 'from item_uploader.utils_common import ...' 등을 수행하는
+#   레거시 코드를 고려해, 해당 경로를 로컬 utils_common에 매핑한다.
+uploader_pkg = types.ModuleType("item_uploader")
+utils_mod = sys.modules.get("utils_common")
+if utils_mod is None:
+    # 방어: 혹시 위에서 로컬 임포트가 안 됐다면 실제 주입된 모듈을 찾아 등록
+    import importlib
+    utils_mod = importlib.import_module("utils_common")
+
+uploader_utils = types.ModuleType("item_uploader.utils_common")
+# 로컬 utils에서 필요한 심볼을 그대로 export
+for _name in ("authorize_gspread", "extract_sheet_id", "get_tem_sheet_name",
+              "open_creation_by_env", "ensure_worksheet", "join_url",
+              "choose_cover_key", "forward_fill_by_group", "safe_worksheet",
+              "with_retry"):
+    if hasattr(utils_mod, _name):
+        setattr(uploader_utils, _name, getattr(utils_mod, _name))
+
+# automation_steps.get_tem_sheet_name shim
+uploader_auto = types.ModuleType("item_uploader.automation_steps")
+setattr(uploader_auto, "get_tem_sheet_name", get_tem_sheet_name)
+
+# sys.modules에 주입
+sys.modules.setdefault("item_uploader", uploader_pkg)
+sys.modules["item_uploader.utils_common"] = uploader_utils
+sys.modules["item_uploader.automation_steps"] = uploader_auto
+
+# (선택) item_creator 경로도 동일하게 보정
+creator_pkg = types.ModuleType("item_creator")
+sys.modules.setdefault("item_creator", creator_pkg)
+sys.modules["item_creator.utils_common"] = utils_mod  # 로컬 utils 재사용
+
+# ---------------------------------------------------------------------
+# 3) creation_steps 모듈 임포트
+#    - 이 모듈 안에 ShopeeCreator(impl)가 정의되어 있으며 run()->bool,
+#      get_tem_values_csv()->Optional[bytes] 를 제공한다.
 # ---------------------------------------------------------------------
 try:
-    # 업로더 쪽 유틸에는 검증된 authorize_gspread가 존재
-    from item_uploader.utils_common import authorize_gspread
-except Exception:
-    # item_creator에 별도 구현이 있다면 여기에 추가하거나, 에러 발생
-    raise ImportError("authorize_gspread 를 찾을 수 없습니다. item_uploader.utils_common 에서 제공되는 함수를 사용하세요.")
+    import creation_steps as _steps_mod
+    _ImplCreator = getattr(_steps_mod, "ShopeeCreator", None)
+except Exception as e:
+    _ImplCreator = None
+    _last_import_error = e
 
 # ---------------------------------------------------------------------
-# 생성 단계 함수들(신규 생성 전용)
+# 4) 페이지 호환 컨트롤러 (래퍼)
 # ---------------------------------------------------------------------
-from item_uploader.automation_steps import get_tem_sheet_name  # TEM 시트명 규칙
-from item_creator.creation_steps import (
-    run_step_C1,                  # TEM_OUTPUT 초기화
-    run_step_C2,                  # Collection → TEM 생성(+그룹 보정)
-    run_step_C4_prices,           # MARGIN → TEM 가격 매핑
-    run_step_C5_images,           # 이미지 URL 채우기 + Variation 복원
-    run_step_C6_stock_weight_brand,  # 재고/무게/브랜드 기본값 처리
-)
-
-# ---------------------------------------------------------------------
-# (선택) 진행률 콜백 타입 & 헬퍼
-# ---------------------------------------------------------------------
-ProgressCB = Callable[[int, str], None]
-def _progress(cb: Optional[ProgressCB], percent: int, message: str) -> None:
-    if cb:
-        cb(percent, message)
-
-# =====================================================================
-# 컨트롤러
-# =====================================================================
 class ShopeeCreator:
     """
-    페이지 코드와 완전 호환:
-      - __init__(sheet_url, ref_url, cover_base_url, details_base_url, option_base_url, shop_code)
-      - run(shop_code=..., cover_base_url=..., details_base_url=..., option_base_url=...)  ← 페이지에서 이렇게 호출
+    페이지(3_Create Items.py)가 직접 사용하는 컨트롤러 (호환 래퍼).
+
+    - __init__ 인자와 run()/get_tem_values_csv() 시그니처를 페이지에 맞춤
+    - 내부적으로 creation_steps.ShopeeCreator(impl) 에 위임
+    - impl이 없더라도 친절한 에러를 반환 (ImportError 등)
     """
 
     def __init__(
         self,
+        *,
         sheet_url: str,
         ref_url: Optional[str] = None,
-        cover_base_url: str = "",
-        details_base_url: str = "",
-        option_base_url: str = "",
-        shop_code: str = "",
-    ):
-        # URL → ID
-        self.sheet_url = sheet_url
-        self.ref_url = ref_url
-        self.sheet_id = extract_sheet_id(sheet_url)
-        self.ref_id = extract_sheet_id(ref_url) if ref_url else None
-
-        # 기본 URL / 샵코드(초깃값)
-        self.cover_base_url = cover_base_url
-        self.details_base_url = details_base_url
-        self.option_base_url = option_base_url
-        self.shop_code = shop_code
-
-        # 연결 핸들
-        self.gc: Optional[gspread.Client] = None
-        self.sh: Optional[gspread.Spreadsheet] = None
-        self.ref: Optional[gspread.Spreadsheet] = None
-
-    # ----------------------------------------------------------
-    # 내부: Google Sheets 연결
-    # ----------------------------------------------------------
-    def _connect(self) -> None:
-        if not self.sheet_id:
-            raise RuntimeError("상품등록 시트 URL/ID가 비었습니다.")
-        self.gc = authorize_gspread()
-        self.sh = self.gc.open_by_key(self.sheet_id)
-        if self.ref_id:
-            self.ref = self.gc.open_by_key(self.ref_id)
-
-    # ----------------------------------------------------------
-    # 내부: Failures 시트 초기화(헤더만 남김)
-    # ----------------------------------------------------------
-    def _clear_failures(self) -> None:
-        assert self.sh is not None
-        try:
-            ws = self.sh.worksheet("Failures")
-        except WorksheetNotFound:
-            ws = self.sh.add_worksheet(title="Failures", rows=1000, cols=10)
-        ws.clear()
-        ws.update("A1:E1", [["PID", "Category", "Name", "Reason", "Detail"]])
-
-    # ----------------------------------------------------------
-    # 내부: TEM_OUTPUT CSV 바이트 + 파일명 반환
-    # ----------------------------------------------------------
-    def _get_tem_values_csv(self) -> Tuple[bytes, str]:
-        assert self.sh is not None
-        tem_ws = self.sh.worksheet(get_tem_sheet_name())
-        vals = tem_ws.get_all_values() or [[""]]
-        buf = io.StringIO(newline="")
-        writer = csv.writer(buf)
-        writer.writerows(vals)
-        data = buf.getvalue().encode("utf-8-sig")
-        return data, "TEM_OUTPUT.csv"
-
-    # ----------------------------------------------------------
-    # 실행(페이지와 호환): 인자 넘기면 필드 업데이트 후 파이프라인 실행
-    # ----------------------------------------------------------
-    def run(
-        self,
-        shop_code: Optional[str] = None,
         cover_base_url: Optional[str] = None,
         details_base_url: Optional[str] = None,
         option_base_url: Optional[str] = None,
-        progress_callback: Optional[ProgressCB] = None,
-    ) -> Dict[str, Any]:
-        """C1 → C2 → C4 → C5 → C6 전체 파이프라인 실행."""
-        logs: List[str] = []
+        shop_code: Optional[str] = None,
+        **_: object,
+    ) -> None:
+        if not sheet_url:
+            raise ValueError("sheet_url is required.")
 
-        def log_step(msg: str, p: int):
-            logs.append(msg)
-            _progress(progress_callback, p, msg)
+        self.sheet_url = sheet_url
+        self.ref_url = ref_url
+        self.cover_base_url = cover_base_url
+        self.details_base_url = details_base_url or None  # 페이지에선 details_base_url 키 사용
+        self.option_base_url = option_base_url
+        self.shop_code = shop_code
 
-        # 필요 시 필드 최신화(페이지에서 run()에 넘긴 값 우선)
-        if shop_code is not None:
-            self.shop_code = shop_code
-        if cover_base_url is not None:
-            self.cover_base_url = cover_base_url
-        if details_base_url is not None:
-            self.details_base_url = details_base_url
-        if option_base_url is not None:
-            self.option_base_url = option_base_url
+        self._impl = None
+        if _ImplCreator is not None:
+            try:
+                self._impl = _ImplCreator(sheet_url=sheet_url, ref_url=ref_url)
+                # 페이지에서 넘긴 값 주입(impl이 사용하지 않아도 무해)
+                for k in ("cover_base_url", "details_base_url", "option_base_url", "shop_code"):
+                    setattr(self._impl, k, getattr(self, k))
+            except Exception:
+                # impl 생성 실패 시에도 런타임에서 에러를 안내하도록 유지
+                self._impl = None
 
+    # ----------------------------------------------------------
+    # 실행
+    # ----------------------------------------------------------
+    def run(self) -> bool:
+        """
+        전체 파이프라인 실행. success/fail bool 반환 (페이지 호환).
+        """
+        if self._impl is None:
+            # impl 로드 실패 원인 안내
+            raise ImportError(
+                "creation_steps 모듈 로드에 실패했습니다. "
+                "로컬 utils_common.py가 존재하고, 본 파일의 shim 등록이 수행되는지 확인하세요."
+            ) from _last_import_error
         try:
-            log_step("Google Sheets 연결 중...", 5)
-            self._connect()
-            assert self.sh is not None
+            return bool(self._impl.run())
+        except Exception:
+            # impl 내부 예외는 그대로 propagate 하되, 페이지에서 st.exception 으로 표시됨
+            raise
 
-            log_step("실패 로그 초기화...", 10)
-            self._clear_failures()
+    # ----------------------------------------------------------
+    # TEM_OUTPUT → CSV
+    # ----------------------------------------------------------
+    def get_tem_values_csv(self) -> Optional[bytes]:
+        """
+        TEM_OUTPUT 시트를 CSV 바이트로 반환. (페이지 호환)
+        """
+        if self._impl and hasattr(self._impl, "get_tem_values_csv"):
+            try:
+                return self._impl.get_tem_values_csv()
+            except Exception:
+                # impl의 CSV 변환 실패 시 폴백 로직 시도
+                pass
 
-            log_step("C1: TEM_OUTPUT 초기화...", 20)
-            run_step_C1(self.sh, self.ref)
-
-            log_step("C2: Collection → TEM_OUTPUT 생성...", 50)
-            if not self.ref:
-                raise RuntimeError("레퍼런스 시트(TemplateDict 등) 연결 필요")
-            run_step_C2(self.sh, self.ref)
-
-            log_step("C4: MARGIN → TEM 가격 매핑...", 70)
-            run_step_C4_prices(self.sh)
-
-            log_step("C5: 이미지 URL 채우기 + Variation 복원...", 85)
-            run_step_C5_images(
-                sh=self.sh,
-                shop_code=self.shop_code or "",
-                cover_base_url=self.cover_base_url or "",
-                details_base_url=self.details_base_url or "",
-                option_base_url=self.option_base_url or "",
-            )
-
-            log_step("C6: 재고/무게/브랜드 기본값 처리...", 92)
-            run_step_C6_stock_weight_brand(self.sh)
-
-            log_step("CSV 내보내기 준비...", 97)
-            data, name = self._get_tem_values_csv()
-
-            log_step("완료!", 100)
-            return {
-                "logs": logs,
-                "download_bytes": data,
-                "download_name": name,
-            }
-
-        except Exception as e:
-            logs.append(f"[오류]\n{traceback.format_exc()}")
-            return {"logs": logs, "error": str(e)}
+        # 폴백: 직접 시트에서 읽어 CSV 생성 (TEM 시트명 유틸 사용)
+        try:
+            import gspread
+            gc = authorize_gspread()
+            sh = gc.open_by_key(extract_sheet_id(self.sheet_url))
+            ws = sh.worksheet(get_tem_sheet_name())
+            values = ws.get_all_values() or []
+            if not values:
+                return None
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerows(values)
+            return buf.getvalue().encode("utf-8-sig")
+        except Exception:
+            return None
