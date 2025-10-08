@@ -216,7 +216,7 @@ def run():
         st.subheader("미리보기")
         img_in = _to_streamlit_image_input(ss.preview_img)
         if img_in is not None:
-            st.image(img_in, caption="미리보기 (첫번째 조합)", use_container_width=True)
+            st.image(img_in, caption="미리보기 (첫번째 조합)", use_column_width=True)
         else:
             st.caption("파일을 업로드하면 미리보기가 표시됩니다.")
 
