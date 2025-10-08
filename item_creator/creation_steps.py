@@ -10,15 +10,50 @@ from gspread.cell import Cell
 from gspread.utils import rowcol_to_a1
 from gspread.exceptions import WorksheetNotFound
 
-# [수정] 공용 유틸리티는 main_controller.py의 shimming에 따라 item_uploader.utils_common에서 가져옵니다.
-from item_uploader.utils_common import (
+# [최종 수정] 모든 공용 유틸리티는 이제 main_controller.py가 로드한
+# utils_common (최상위 모듈 또는 item_creator.utils_common)에서
+# 직접 가져오거나, item_uploader 대신 item_creator의 utils_common을 사용하도록 변경합니다.
+# 이렇게 하면 main_controller.py의 복잡한 shimming 구조에서 발생하는 오류를 피할 수 있습니다.
+
+# item_uploader 경로를 item_creator.utils_common의 함수들로 대체합니다.
+# main_controller가 sys.path에 root와 item_creator를 추가하므로,
+# utils_common에 있는 함수는 from utils_common import ... 로 접근 가능합니다.
+
+# 공용 유틸리티는 repo root의 utils_common과 item_creator의 utils_common에 분산되어 있으므로,
+# main_controller의 shim을 믿고 item_uploader.utils_common에서 일괄 임포트하는 것이 아니라,
+# 직접 유틸리티 모듈에서 필요한 함수들을 임포트합니다.
+
+# item_uploader.utils_common을 직접 참조하는 대신,
+# main_controller가 utils_common과 item_creator.utils_common을 로드한 후
+# creation_steps를 로드하므로, 이들을 최상위/상대 경로로 참조해야 합니다.
+
+# main_controller.py에서 제공하는 유틸리티들을 직접 참조합니다.
+# _find_col_index는 item_uploader.automation_steps에 있었으나,
+# 현재 구조에서는 utils_common.py에 정의되어 있지 않아 에러의 소지가 있습니다.
+# 임포트 오류를 없애기 위해, 유틸리티 함수들을 로컬 utils_common에서만 가져오도록 수정합니다.
+
+from utils_common import (
     header_key, top_of_category, get_tem_sheet_name,
-    _find_col_index, with_retry, safe_worksheet,
+    with_retry, safe_worksheet, authorize_gspread, extract_sheet_id
 )
-# 신규 생성 공용 유틸 (env, URL join, Variation 그룹 forward-fill 등)
-from item_creator.utils_common import get_env, join_url, forward_fill_by_group
-# ShopeeCreator 클래스에서 사용하는 gspread 유틸
-from item_uploader.utils_common import authorize_gspread, extract_sheet_id
+from .utils_common import get_env, join_url, forward_fill_by_group
+
+# _find_col_index 함수가 utils_common.py에 없으므로,
+# item_uploader.automation_steps.py의 내용을 기반으로 여기에 재정의합니다.
+# (이것이 가장 흔한 순환 임포트/모듈 누락 해결책입니다.)
+def _find_col_index(keys: List[str], name: str, extra_alias: List[str]=[]) -> int:
+    """헤더 키 목록(keys=header_key 적용된 리스트)에서 name 또는 alias를 찾음 (automation_steps에서 가져옴)"""
+    tgt = header_key(name)
+    aliases = [header_key(a) for a in extra_alias] + [tgt]
+    # 정확 매칭
+    for i, k in enumerate(keys):
+        if k in aliases:
+            return i
+    # 포함 매칭
+    for i, k in enumerate(keys):
+        if any(a and a in k for a in aliases):
+            return i
+    return -1
 
 
 # (참고) 레퍼런스 시트에서 템플릿 헤더 사전 로딩
