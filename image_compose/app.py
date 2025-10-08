@@ -16,12 +16,16 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # ---------- Streamlit 호환 이미지 렌더 ----------
 def _st_image(img, **kwargs):
-    """Streamlit 버전별 image 인자 호환: use_container_width(신) ↔ use_column_width(구)"""
+    """Streamlit 버전별 image 인자 호환: use_container_width(신) ↔ use_column_width(구) ↔ 키워드 없이."""
     try:
         return st.image(img, use_container_width=True, **kwargs)
     except TypeError:
         kwargs.pop("use_container_width", None)
-        return st.image(img, use_column_width=True, **kwargs)
+        try:
+            return st.image(img, use_column_width=True, **kwargs)
+        except TypeError:
+            kwargs.pop("use_column_width", None)
+            return st.image(img, **kwargs)
 
 
 # ---------- Streamlit이 받을 수 있는 이미지 타입으로 정규화 ----------
@@ -51,6 +55,7 @@ def _to_streamlit_image_input(x):
 def run():
     # (주의) set_page_config는 래퍼(pages/1_Cover Image.py)에서 호출
     st.title("Cover Image")
+    # st.caption("build tag: cover-live-preview @ 16:xx KST")  # 필요시 버전 확인용
 
     # ---- 세션 상태 초기화 ----
     def init_state():
@@ -63,6 +68,7 @@ def run():
             "preview_img": None,       # bytes (단일 미리보기)
             "preview_list": [],        # bytes 리스트 (다중 미리보기)
             "preview_idx": 0,          # 다중 미리보기 인덱스
+            "preview_sig": None,       # 현재 미리보기 입력/옵션의 시그니처 (라이브 갱신용)
             "download_info": None,     # {"buffer": BytesIO, "count": int}
         }
         for k, v in defaults.items():
@@ -71,11 +77,37 @@ def run():
     init_state()
     ss = st.session_state
 
+    # ---------- 유틸: 파일/옵션 시그니처 ----------
+    def _files_fingerprint(files):
+        """UploadedFile 리스트를 간단한 해시(이름+크기)로 요약."""
+        if not files:
+            return []
+        fps = []
+        for f in files:
+            try:
+                name = getattr(f, "name", "noname")
+                # 일부 환경에서 UploadedFile에 size 속성이 없을 수 있음 → getbuffer().nbytes로 보완
+                try:
+                    size = getattr(f, "size", None)
+                except Exception:
+                    size = None
+                if size is None:
+                    try:
+                        size = len(f.getvalue())
+                    except Exception:
+                        size = 0
+                fps.append((name, int(size)))
+            except Exception:
+                fps.append(("unknown", 0))
+        return fps
+
+    def _options_signature():
+        return (ss.anchor, float(ss.resize_ratio), ss.shadow_preset)
+
     # ---- 합성 미리보기 (첫 1장) ----
     def update_preview(item_files, template_files):
         """업로드된 첫 번째 아이템/템플릿으로 미리보기 1장을 만들어 ss.preview_img(bytes)에 저장."""
         ss.preview_img = None
-
         if not item_files or not template_files:
             return
 
@@ -120,10 +152,9 @@ def run():
             data = result.getvalue()
         elif isinstance(result, (bytes, bytearray)):
             data = bytes(result)
-
         ss.preview_img = data
 
-    # ---- 다중 미리보기 생성 ----
+    # ---- 다중 미리보기 생성 (자동/실시간) ----
     def generate_preview_list(item_files, template_files, max_count: int = 12):
         """업로드된 아이템 × 템플릿 조합으로 최대 max_count장의 미리보기(bytes) 생성."""
         ss.preview_list = []
@@ -223,7 +254,7 @@ def run():
                 )
             if count > 0:
                 ss.download_info = {"buffer": zip_buf, "count": count}
-                st.rerun()
+                st.rerun()  # 다운로드 버튼 반영 위해 1회만 재실행 (일상 상호작용의 깜빡임과 무관)
             else:
                 st.warning("생성된 이미지가 없습니다. Item이 투명 배경을 가졌는지 확인해주세요.")
 
@@ -240,7 +271,7 @@ def run():
         )
         if st.button("아이템 리스트 삭제"):
             ss.item_uploader_key += 1
-            st.rerun()
+            # 버튼 자체가 rerun을 유발 → rerun 호출 불필요
 
         template_files = st.file_uploader(
             "2. Template 이미지 업로드",
@@ -250,7 +281,6 @@ def run():
         )
         if st.button("템플릿 삭제"):
             ss.template_uploader_key += 1
-            st.rerun()
 
     with right:
         st.subheader("이미지 설정")
@@ -277,53 +307,67 @@ def run():
 
         c3.selectbox("그림자 프리셋", list(SHADOW_PRESETS.keys()), key="shadow_preset")
 
-        # 설정 변경 시 단일 미리보기 갱신
-        update_preview(item_files, template_files)
+        # ---- 프리뷰 고정 슬롯(깜빡임 최소화) ----
+        preview_header = st.empty()
+        preview_nav    = st.empty()
+        preview_image  = st.empty()
+        preview_hint   = st.empty()
 
-        st.subheader("미리보기")
+        preview_header.subheader("미리보기")
 
-        # 다중 미리보기 생성/갱신
-        if st.button("미리보기 전체 생성/업데이트", use_container_width=True):
-            with st.spinner("미리보기를 생성 중입니다..."):
-                generate_preview_list(item_files, template_files)
-            st.rerun()
+        # ---- 실시간 적용: 입력/옵션 시그니처를 기준으로 자동 갱신 ----
+        cur_sig = (tuple(_files_fingerprint(item_files)),
+                   tuple(_files_fingerprint(template_files)),
+                   _options_signature())
 
-        # 단일(업로드 직후) 미리보기
-        img_in = _to_streamlit_image_input(ss.preview_img)
-        if img_in is not None and not ss.preview_list:
-            _st_image(img_in, caption="미리보기 (단일)")
-            st.caption("‘미리보기 전체 생성/업데이트’를 누르면 여러 장을 넘기며 볼 수 있어요.")
+        if cur_sig != ss.preview_sig:
+            # 단일 프리뷰 갱신
+            update_preview(item_files, template_files)
+            # 다중 프리뷰 갱신
+            generate_preview_list(item_files, template_files)
+            ss.preview_sig = cur_sig
 
-        # 다중 미리보기 페이저
+        # ---- 미리보기 네이게이션 / 렌더 ----
         if ss.preview_list:
             n = len(ss.preview_list)
-            cprev, ccenter, cnext = st.columns([1, 5, 1])
-            with cprev:
-                if st.button("◀", use_container_width=True):
-                    ss.preview_idx = (ss.preview_idx - 1) % n
-                    st.rerun()
-            with ccenter:
-                st.write(f"**{ss.preview_idx + 1} / {n}**")
-            with cnext:
-                if st.button("▶", use_container_width=True):
-                    ss.preview_idx = (ss.preview_idx + 1) % n
-                    st.rerun()
+            with preview_nav.container():
+                cprev, ccenter, cnext = st.columns([1, 5, 1])
+                with cprev:
+                    if st.button("◀", use_container_width=True):
+                        ss.preview_idx = (ss.preview_idx - 1) % n
+                with ccenter:
+                    st.write(f"**{ss.preview_idx + 1} / {n}**")
+                with cnext:
+                    if st.button("▶", use_container_width=True):
+                        ss.preview_idx = (ss.preview_idx + 1) % n
 
             current_bytes = ss.preview_list[ss.preview_idx]
-            _st_image(_to_streamlit_image_input(current_bytes), caption=f"미리보기 #{ss.preview_idx + 1}")
-        elif not img_in:
-            st.caption("파일을 업로드하면 미리보기가 표시됩니다.")
+            preview_image.image(
+                _to_streamlit_image_input(current_bytes),
+                caption=f"미리보기 #{ss.preview_idx + 1}",
+                use_column_width=True,  # 구/신버전 모두 안전
+            )
+            preview_hint.empty()
+        else:
+            # 단일(업로드 직후) 미리보기 또는 힌트
+            img_in = _to_streamlit_image_input(ss.preview_img)
+            if img_in is not None:
+                preview_image.image(img_in, caption="미리보기 (단일)", use_column_width=True)
+                preview_hint.caption("업로드/설정 변경 시 자동으로 여러 장 미리보기를 생성합니다.")
+            else:
+                preview_image.empty()
+                preview_hint.caption("파일을 업로드하면 미리보기가 표시됩니다.")
 
-        # 실행/다운로드
+        # ---- 실행/다운로드 (버튼 텍스트 변경) ----
         st.button(
-            "생성하기",
+            "다운로드",
             type="primary",
             use_container_width=True,
             disabled=(not item_files or not template_files),
             on_click=lambda: show_save_dialog(item_files, template_files),
         )
 
-    # ---- 다운로드 버튼 ----
+    # ---- 다운로드 버튼 (다이얼로그 완료 후 노출) ----
     if ss.get("download_info"):
         info = ss.download_info
         st.success(f"총 {info['count']}개의 이미지 생성 완료!")
