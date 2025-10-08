@@ -6,3 +6,4 @@ Streamlit multi-page app.
 ```bash
 pip install -r requirements.txt
 streamlit run Home.py
+# shopee-dev
