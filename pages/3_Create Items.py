@@ -26,7 +26,7 @@ from item_creator.utils_common import (
 st.set_page_config(page_title="Create Template", layout="wide", initial_sidebar_state="expanded")
 
 # 전역 테마 (사이드바 노출, 컴포넌트 글래스)
-apply_theme(hide_sidebar=False, components_glass=True)
+apply_theme(hide_sidebar=False)
 
 # 타이틀 + PNG 아이콘
 title_with_icon("Create Template", "create")

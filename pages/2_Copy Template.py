@@ -21,7 +21,7 @@ from item_uploader.utils_common import (
 )
 
 # 전역 테마 적용 (사이드바 노출, 컴포넌트 글래스)
-apply_theme(hide_sidebar=False, components_glass=True)
+apply_theme(hide_sidebar=False)
 
 
 # ==============================

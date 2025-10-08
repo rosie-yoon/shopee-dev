@@ -18,7 +18,7 @@ from image_compose.app import run as image_compose_run
 st.set_page_config(page_title="Cover Image", layout="wide", initial_sidebar_state="expanded")
 
 # 홈이 아니므로 사이드바 보이되, 컴포넌트까지 글래스 톤으로 통일
-apply_theme(hide_sidebar=False, components_glass=True)
+apply_theme(hide_sidebar=False)
 
 # 실제 페이지 실행
 image_compose_run()
