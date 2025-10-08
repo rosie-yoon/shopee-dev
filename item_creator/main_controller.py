@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-main_controller.py (A안 v3: creation_steps/ utils_common 로딩을 근본적으로 안정화)
+main_controller.py (A안 v4: 근본적 임포트 안정화 + nonlocal 오류 제거)
 
 - 페이지(3_Create Items.py)와 인터페이스 100% 호환:
   class ShopeeCreator(...); run()->bool; get_tem_values_csv()->Optional[bytes]
-- utils_common / creation_steps 로딩 전략 (배포/로컬 모두 견고):
-  1) repo root, item_creator 디렉터리를 sys.path에 선주입
+- utils_common / creation_steps 로딩 전략:
+  1) repo root 및 item_creator 디렉터리를 sys.path에 선주입
   2) utils_common: 로컬 import → 파일 직접 로드 → item_creator → item_uploader
   3) creation_steps: item_creator.creation_steps → creation_steps → 파일 직접 로드
-  4) 레거시 임포트(item_uploader.*)는 shim으로 흡수
+  4) 레거시 경로(item_uploader.*)는 shim으로 흡수
 """
 
 from __future__ import annotations
@@ -20,22 +20,17 @@ import importlib, importlib.util
 # -----------------------------------------------------------------------------
 # 0) 경로 선정렬: repo root / item_creator 를 sys.path 선주입
 # -----------------------------------------------------------------------------
-_THIS = Path(__file__).resolve()                           # .../item_creator/main_controller.py
-_ROOT = _THIS.parents[1]                                   # repo root
-_ITEM_CREATOR_DIR = _THIS.parent                           # .../item_creator
+_THIS = Path(__file__).resolve()            # .../item_creator/main_controller.py
+_ROOT = _THIS.parents[1]                    # repo root
+_ITEM_CREATOR_DIR = _THIS.parent            # .../item_creator
 
 for _p in (str(_ROOT), str(_ITEM_CREATOR_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 # -----------------------------------------------------------------------------
-# 1) utils_common 안전 임포트 (로컬 > 파일 직접 로드 > item_creator > item_uploader)
+# 유틸: 파일 경로에서 모듈 직접 로드
 # -----------------------------------------------------------------------------
-_last_import_error = None
-authorize_gspread = None
-extract_sheet_id = None
-get_tem_sheet_name = None
-
 def _load_module_from_path(modname: str, path: Path):
     if not path.exists():
         return None
@@ -47,29 +42,29 @@ def _load_module_from_path(modname: str, path: Path):
     spec.loader.exec_module(mod)
     return mod
 
+# -----------------------------------------------------------------------------
+# 1) utils_common 안전 임포트 (로컬 > 파일 직접 로드 > item_creator > item_uploader)
+# -----------------------------------------------------------------------------
+_last_import_error = None
 utils_mod = None
 
-# (a) 로컬 이름 임포트 시도
 try:
     utils_mod = importlib.import_module("utils_common")
 except Exception as e:
     _last_import_error = e
 
-# (b) 파일 직접 로드 (repo root/utils_common.py)
 if utils_mod is None:
     try:
         utils_mod = _load_module_from_path("utils_common", _ROOT / "utils_common.py")
     except Exception as e:
         _last_import_error = e
 
-# (c) item_creator.utils_common
 if utils_mod is None:
     try:
         utils_mod = importlib.import_module("item_creator.utils_common")  # type: ignore
     except Exception as e:
         _last_import_error = e
 
-# (d) item_uploader.utils_common
 if utils_mod is None:
     try:
         utils_mod = importlib.import_module("item_uploader.utils_common")  # type: ignore
@@ -94,7 +89,6 @@ if get_tem_sheet_name is None:
 # -----------------------------------------------------------------------------
 # 2) shim: 레거시 경로(item_uploader.*)를 로컬 utils로 매핑
 # -----------------------------------------------------------------------------
-# - creation_steps 내부가 과거 경로를 import해도 통과되도록 보정
 uploader_pkg = types.ModuleType("item_uploader")
 uploader_utils = types.ModuleType("item_uploader.utils_common")
 for _name in (
@@ -119,36 +113,34 @@ sys.modules["item_creator.utils_common"] = utils_mod
 # 3) creation_steps 안전 임포트
 #    - 1순위: item_creator.creation_steps
 #    - 2순위: creation_steps (repo root)
-#    - 3순위: 파일 직접 로드 (root/item_creator 하위)
+#    - 3순위: 파일 직접 로드 (item_creator/creation_steps.py → root/creation_steps.py)
 # -----------------------------------------------------------------------------
-_ImplCreator = None
-_import_err = None
+_steps_mod = None
+_creation_import_errors = []
 
-def _try_import_creation_steps():
-    # 1) 패키지 경로 우선
+try:
+    _steps_mod = importlib.import_module("item_creator.creation_steps")
+except Exception as e:
+    _creation_import_errors.append(e)
+
+if _steps_mod is None:
     try:
-        return importlib.import_module("item_creator.creation_steps")
+        _steps_mod = importlib.import_module("creation_steps")
     except Exception as e:
-        nonlocal _import_err
-        _import_err = e
-    # 2) 루트 모듈
-    try:
-        return importlib.import_module("creation_steps")
-    except Exception as e:
-        _import_err = e
-    # 3) 파일 직접 로드 (item_creator/creation_steps.py → root/creation_steps.py 순)
+        _creation_import_errors.append(e)
+
+if _steps_mod is None:
     for path in (_ITEM_CREATOR_DIR / "creation_steps.py", _ROOT / "creation_steps.py"):
         try:
             mod = _load_module_from_path("creation_steps", path)
             if mod:
-                return mod
+                _steps_mod = mod
+                break
         except Exception as e:
-            _import_err = e
-    return None
+            _creation_import_errors.append(e)
 
-_steps_mod = _try_import_creation_steps()
-if _steps_mod is not None:
-    _ImplCreator = getattr(_steps_mod, "ShopeeCreator", None)
+_ImplCreator = getattr(_steps_mod, "ShopeeCreator", None) if _steps_mod else None
+_creation_last_error = _creation_import_errors[-1] if _creation_import_errors else None
 
 # -----------------------------------------------------------------------------
 # 4) 페이지 호환 컨트롤러 (래퍼)
@@ -196,9 +188,9 @@ class ShopeeCreator:
         if self._impl is None:
             raise ImportError(
                 "creation_steps 모듈 로드 실패. "
-                "다음을 확인하세요: (1) item_creator/creation_steps.py 존재 여부 "
-                "(2) utils_common 경로/파일 존재 (3) 본 컨트롤러(v3)로 교체 완료"
-            ) from _import_err or _last_import_error
+                "확인: (1) item_creator/creation_steps.py 존재 (2) repo root의 utils_common.py 존재 "
+                "(3) 본 컨트롤러(v4) 반영 및 배포 완료"
+            ) from _creation_last_error or _last_import_error
         return bool(self._impl.run())
 
     def get_tem_values_csv(self) -> Optional[bytes]:
