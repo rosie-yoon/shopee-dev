@@ -12,19 +12,29 @@ from gspread.exceptions import WorksheetNotFound  # ⬅️ 추가
 class ShopeeCreator:
     def __init__(
         self,
-        creation_spreadsheet_id: str,
-        cover_base_url: str,
-        details_base_url: str,
-        option_base_url: str,
-        ref_spreadsheet_id: Optional[str] = None,
-        shop_code: str = "",       # ⬅️ 추가: 샵코드
+        sheet_url: str,
+        ref_url: Optional[str] = None,
+        cover_base_url: str = "",
+        details_base_url: str = "",
+        option_base_url: str = "",
+        shop_code: str = "",
     ):
-        self.creation_spreadsheet_id = creation_spreadsheet_id
+        """Initialize with Google Sheet URLs (user-facing)."""
+
+        # URL → ID 변환
+        self.sheet_url = sheet_url
+        self.ref_url = ref_url
+        self.sheet_id = extract_sheet_id(sheet_url)
+        self.ref_id = extract_sheet_id(ref_url) if ref_url else None
+
+        # 기본 URL 설정
         self.cover_base_url = cover_base_url
         self.details_base_url = details_base_url
         self.option_base_url = option_base_url
-        self.ref_spreadsheet_id = ref_spreadsheet_id
-        self.shop_code = shop_code  # ⬅️ 추가
+
+        # 샵코드 저장
+        self.shop_code = shop_code
+
 
         self.gc: Optional[gspread.Client] = None
         self.sh: Optional[gspread.Spreadsheet] = None
