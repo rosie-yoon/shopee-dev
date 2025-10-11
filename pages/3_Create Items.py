@@ -1,6 +1,7 @@
 # pages/3_Create Items.py
 # -*- coding: utf-8 -*-
 import sys
+from item_uploader import item_creator
 from pathlib import Path
 import streamlit as st
 

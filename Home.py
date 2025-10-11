@@ -19,9 +19,9 @@ apply_theme(hide_sidebar=True)
 
 # --------------------------------------------------------------------
 # 쿼리 파라미터로 페이지 전환 (카드 전체 클릭용)
+#   - Streamlit 버전별 query_params API 호환
 # --------------------------------------------------------------------
 def get_nav_target() -> str | None:
-    # Streamlit 버전 호환: query_params / experimental_get_query_params
     try:
         nav = st.query_params.get("nav", None)
         if isinstance(nav, list):
@@ -32,7 +32,6 @@ def get_nav_target() -> str | None:
 
 target = get_nav_target()
 if target:
-    # 예: target == "pages/3_Create Items.py"
     st.switch_page(target)
 
 # --------------------------------------------------------------------
@@ -46,8 +45,11 @@ def resolve_icon(name: str) -> Path:
     return hi if hi.exists() else lo
 
 def icon_b64(path: Path) -> str:
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode()
+    try:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except Exception:
+        return ""
 
 ICONS = {
     "cover":  resolve_icon("cover"),
@@ -56,14 +58,11 @@ ICONS = {
 }
 
 # --------------------------------------------------------------------
-# 페이지 전용 스타일 (카드만)
-#  - 밑줄 제거/hover 밑줄 제거
-#  - 같은 탭 전환(target=_self)과 함께 사용
+# 페이지 전용 스타일 (카드)
 # --------------------------------------------------------------------
 st.markdown(
     """
     <style>
-      /* 카드: 단일 레이어 */
       .ui-card{
         background: rgba(255,255,255,.08);
         backdrop-filter: blur(10px);
@@ -75,7 +74,6 @@ st.markdown(
       }
       .ui-card:hover{ background: rgba(255,255,255,.12); transform: translateY(-1px); }
 
-      /* 카드 링크(전체 클릭) - 밑줄/하이라이트 제거 */
       a.card-link {
         display:block;
         text-decoration:none !important;
@@ -85,11 +83,8 @@ st.markdown(
       }
       a.card-link:hover,
       a.card-link:active,
-      a.card-link *{
-        text-decoration:none !important;
-      }
+      a.card-link *{ text-decoration:none !important; }
 
-      /* 헤더(아이콘+타이틀) 가로 정렬 */
       .row{ display:flex; align-items:center; gap:10px; margin-bottom:6px; }
       .row img{ width:36px; height:36px; flex:0 0 auto; }
       .row .title{ font-weight:800; font-size:1.1rem; margin:0; color:#fff; }
@@ -114,10 +109,16 @@ cards = [
         "path": "pages/1_Cover Image.py",
     },
     {
+        "icon": ICONS["copy"],
+        "title": "Copy Template",
+        "desc": "템플릿 복사 및 업로드 적용 (Item-Uploader)",
+        "path": "pages/2_Copy Template.py",
+    },
+    {
         "icon": ICONS["create"],
         "title": "Create Template",
-        "desc": "신규 상품 Mass Upload 템플릿 생성",
-        "path": "pages/3_Create Items.py",
+        "desc": "신규 상품 Mass Upload 템플릿 생성 (Item-Creator)",
+        "path": "pages/3_Create Template.py",
     },
 ]
 
@@ -125,7 +126,6 @@ cols = st.columns(3)
 for col, c in zip(cols, cards):
     with col:
         b64 = icon_b64(c["icon"]) if Path(c["icon"]).exists() else ""
-        # 앵커의 href를 ?nav=... 로 만들어 카드 전체를 클릭 가능하게
         href = f"?nav={quote(c['path'])}"
         st.markdown(
             f"""
