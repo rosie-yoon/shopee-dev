@@ -1,9 +1,6 @@
 # pages/3_Create Template.py
 # -*- coding: utf-8 -*-
-from pathlib import Path
 import streamlit as st
-
-# 새 구조 기반 import
 from shopee_creator.controller import ShopeeCreator
 from shopee_creator.creation_steps import export_tem_xlsx, export_tem_csv
 
@@ -40,6 +37,7 @@ def _get_ref_url_from_secrets() -> str | None:
             return str(v)
     return None
 
+
 REF_URL = _get_ref_url_from_secrets()
 if not REF_URL:
     st.warning("`secrets`에 레퍼런스 시트 ID가 없습니다. "
@@ -54,11 +52,12 @@ with c1:
 with c2:
     sheet_url = st.text_input("상품등록 시트 URL (필수)", placeholder="https://docs.google.com/...")
 
-cover_url   = st.text_input("Cover base URL (필수)",   placeholder="https://example.com/covers/")
-details_url = st.text_input("Details base URL (필수)", placeholder="https://example.com/details/")
-option_url  = st.text_input("Option base URL (필수)",  placeholder="https://example.com/options/")
+base_url = st.text_input(
+    "이미지 Base URL (필수)",
+    placeholder="https://example.com/assets/"
+)
 
-all_filled = all([shop_code, sheet_url, cover_url, details_url, option_url, REF_URL])
+all_filled = all([shop_code, sheet_url, base_url, REF_URL])
 st.divider()
 
 # --------------------------------------------------------------------
@@ -69,17 +68,27 @@ run_disabled = not all_filled
 if st.button("실행", type="primary", use_container_width=True, disabled=run_disabled):
     try:
         ctrl = ShopeeCreator(st.secrets)
+        ctrl.set_image_bases(
+            shop_code=shop_code,
+            cover=base_url,
+            details=base_url,
+            option=base_url
+        )
         with st.spinner("C1~C6 단계 실행 중..."):
             results = ctrl.run(input_sheet_url=sheet_url)
 
         st.success("템플릿 생성 완료 ✅")
         for log in results:
             with st.expander(f"{'✅' if log.ok else '❌'} {log.name}", expanded=not log.ok):
-                st.write({"ok": log.ok, "count": log.count, "error": log.error})
+                st.write({
+                    "ok": log.ok,
+                    "count": log.count,
+                    "error": log.error
+                })
 
         # TEM_OUTPUT 시트에서 XLSX 추출
         try:
-            sh = ctrl.gs.sheet_by_url(sheet_url)
+            sh = ctrl.gs.open_by_url(sheet_url)  # ✅ 수정됨 (sheet_by_url → open_by_url)
             xlsx_io = export_tem_xlsx(sh)
             if xlsx_io:
                 st.download_button(

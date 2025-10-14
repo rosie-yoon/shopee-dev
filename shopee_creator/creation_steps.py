@@ -120,24 +120,35 @@ def run_step_C1(sh: gspread.Spreadsheet, ref: Optional[gspread.Spreadsheet]) -> 
 def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
     print("\n[ Create ] Step C2: Build TEM from Collection ...")
     tem_name = get_tem_sheet_name()
+
+    # [DEBUG] 템플릿 딕셔너리 로드 결과 확인
     template_dict = _load_template_dict(ref)
+    print(f"[C2][DEBUG] TemplateDict loaded. top-level count = {len(template_dict)}")
 
     coll_ws = safe_worksheet(sh, "Collection")
     coll_vals = with_retry(lambda: coll_ws.get_all_values()) or []
+
+    # [DEBUG] Collection 데이터 유무/헤더 길이 확인
+    print(f"[C2][DEBUG] Collection rows = {len(coll_vals)}"
+          f" (header cols = {len(coll_vals[0]) if coll_vals else 0})")
+
     if not coll_vals or len(coll_vals) < 2:
-        print("[C2] Collection 비어 있음.")
+        print("[C2] Collection 비어 있음. (rows < 2)")
         return
 
     colmap = _collect_indices(coll_vals[0])
-    create_i = colmap["create"] if colmap["create"] >= 0 else 0
-    variation_i = colmap["variation"] if colmap["variation"] >= 0 else 1
-    sku_i = colmap["sku"] if colmap["sku"] >= 0 else 2
-    brand_i = colmap["brand"] if colmap["brand"] >= 0 else 3
-    option_i = colmap["option_eng"] if colmap["option_eng"] >= 0 else 5
-    pname_i = colmap["prod_name"] if colmap["prod_name"] >= 0 else 7
-    desc_i = colmap["desc"] if colmap["desc"] >= 0 else 9
-    category_i = colmap["category"] if colmap["category"] >= 0 else 10
-    dcount_i = colmap["detail_idx"] if colmap["detail_idx"] >= 0 else 11
+    # [DEBUG] 주요 컬럼 인덱스 덤프
+    print("[C2][DEBUG] colmap =", colmap)
+
+    create_i   = colmap["create"]    if colmap["create"]    >= 0 else 0
+    variation_i= colmap["variation"] if colmap["variation"] >= 0 else 1
+    sku_i      = colmap["sku"]       if colmap["sku"]       >= 0 else 2
+    brand_i    = colmap["brand"]     if colmap["brand"]     >= 0 else 3
+    option_i   = colmap["option_eng"]if colmap["option_eng"]>= 0 else 5
+    pname_i    = colmap["prod_name"] if colmap["prod_name"] >= 0 else 7
+    desc_i     = colmap["desc"]      if colmap["desc"]      >= 0 else 9
+    category_i = colmap["category"]  if colmap["category"]  >= 0 else 10
+    dcount_i   = colmap["detail_idx"]if colmap["detail_idx"]>= 0 else 11
 
     fill_cols = [variation_i, brand_i, pname_i, desc_i, category_i, dcount_i]
 
@@ -151,6 +162,10 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
         reset_when=_reset_when,
     )
 
+    # [DEBUG] forward fill 후 데이터 샘플
+    print(f"[C2][DEBUG] forward-filled rows = {len(ff_vals)}")
+    # print("[C2][DEBUG] ff header =", ff_vals[0])  # 필요시 주석 해제
+
     buckets: Dict[str, Dict[str, List]] = {}
     failures: List[List[str]] = []
 
@@ -159,18 +174,19 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
         if idx >= 0:
             row[idx] = value
 
+    created_rows = 0  # [DEBUG] 카운터
     for r in range(1, len(ff_vals)):
         row = ff_vals[r]
         if not _is_true(row[create_i] if create_i < len(row) else ""):
-            continue
+            continue  # create=False 는 스킵
 
         variation = (row[variation_i] if variation_i < len(row) else "").strip()
-        sku = (row[sku_i] if sku_i < len(row) else "").strip()
-        brand = (row[brand_i] if brand_i < len(row) else "").strip()
-        opt1 = (row[option_i] if option_i < len(row) else "").strip()
-        pname = (row[pname_i] if pname_i < len(row) else "").strip()
-        desc = (row[desc_i] if desc_i < len(row) else "").strip()
-        category = (row[category_i] if category_i < len(row) else "").strip()
+        sku       = (row[sku_i]       if sku_i       < len(row) else "").strip()
+        brand     = (row[brand_i]     if brand_i     < len(row) else "").strip()
+        opt1      = (row[option_i]    if option_i    < len(row) else "").strip()
+        pname     = (row[pname_i]     if pname_i     < len(row) else "").strip()
+        desc      = (row[desc_i]      if desc_i      < len(row) else "").strip()
+        category  = (row[category_i]  if category_i  < len(row) else "").strip()
 
         if not category:
             pid = variation or sku or f"ROW{r+1}"
@@ -180,7 +196,8 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
         top_norm = header_key(top_of_category(category) or "")
         headers = template_dict.get(top_norm)
         if not headers:
-            failures.append(["", category, pname, "TEMPLATE_TOPLEVEL_NOT_FOUND", f"top={top_of_category(category)}"])
+            failures.append(["", category, pname, "TEMPLATE_TOPLEVEL_NOT_FOUND",
+                             f"top={top_of_category(category)}"])
             continue
 
         tem_row = [""] * len(headers)
@@ -197,11 +214,17 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
         b = buckets.setdefault(top_norm, {"headers": headers, "pids": [], "rows": []})
         b["pids"].append([pid])
         b["rows"].append(tem_row)
+        created_rows += 1  # [DEBUG]
+
+    # [DEBUG] 생성 결과 요약
+    print(f"[C2][DEBUG] created_rows = {created_rows}, failures = {len(failures)}, buckets = {len(buckets)}")
 
     out_matrix: List[List[str]] = []
-    for _, pack in buckets.items():
+    for top_key, pack in buckets.items():
         out_matrix.append(["PID"] + pack["headers"])
         out_matrix.extend([pid_row + data_row for pid_row, data_row in zip(pack["pids"], pack["rows"])])
+        # [DEBUG] 버킷별 행수
+        print(f"[C2][DEBUG] bucket[{top_key}] rows = {len(pack['rows'])}")
 
     if out_matrix:
         tem_ws = safe_worksheet(sh, tem_name)
@@ -210,10 +233,12 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
         end_a1 = rowcol_to_a1(len(out_matrix), max_cols)
         with_retry(lambda: tem_ws.resize(rows=len(out_matrix) + 10, cols=max_cols + 10))
         with_retry(lambda: tem_ws.update(values=out_matrix, range_name=f"A1:{end_a1}"))
+        print(f"[C2] TEM_OUTPUT updated. rows={len(out_matrix)} cols={max_cols}")
+    else:
+        print("[C2] out_matrix is empty → TEM_OUTPUT 미갱신 (TemplateDict/Collection 확인 필요)")
 
     # TODO: failures 기록 시트 처리(필요시)
     print(f"C2 Done. Buckets: {len(buckets)}")
-
 
 # -------------------------------------------------------------------
 # C3: FDA Registration No. 채우기
