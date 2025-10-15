@@ -61,21 +61,44 @@ def _pick_index_by_candidates(header_row: List[str], candidates: List[str]) -> i
     return -1
 
 
+from gspread.exceptions import WorksheetNotFound
+
 def _load_template_dict(ref: gspread.Spreadsheet) -> Dict[str, List[str]]:
-    """Reference 시트에서 TopLevel→템플릿 헤더 목록을 로드"""
+    """
+    Reference 시트의 TemplateDict 탭에서
+    TopLevel(첫 컬럼) → [헤더들] 매핑을 로드.
+    - 탭이 없거나 데이터가 없으면 명확한 에러로 중단(디버깅 용이)
+    """
     ref_sheet = get_env("TEMPLATE_DICT_SHEET_NAME", "TemplateDict")
-    ws = safe_worksheet(ref, ref_sheet)
+
+    # 탭은 반드시 존재해야 함: 없으면 바로 예외
+    try:
+        ws = ref.worksheet(ref_sheet)
+    except WorksheetNotFound:
+        raise WorksheetNotFound(f"Required sheet '{ref_sheet}' not found in '{ref.title}'")
+
     vals = with_retry(lambda: ws.get_all_values()) or []
 
-    # 👇 [DEBUG] 추가
-    print(f"[TDict][DEBUG] ref='{ref.title}' tab='{ref_sheet}' rows={len(template_vals)}")
-    print("[TDict][DEBUG] tabs in ref (head):", [w.title for w in ref.worksheets()][:10])
+    # 디버그 로그 (변수명 일관!)
+    print(f"[TDict][DEBUG] ref='{ref.title}' tab='{ref_sheet}' rows={len(vals)}")
+    try:
+        print("[TDict][DEBUG] tabs in ref (head):", [w.title for w in ref.worksheets()][:10])
+    except Exception:
+        pass
+
+    if len(vals) < 2:
+        raise RuntimeError(
+            f"TemplateDict has no data (rows={len(vals)}) in '{ref.title}'. "
+            f"Tab '{ref_sheet}' must have header + at least 1 data row."
+        )
 
     out: Dict[str, List[str]] = {}
     for r in vals[1:]:
         if not r or not (r[0] or "").strip():
             continue
         out[header_key(r[0])] = [str(x or "").strip() for x in r[1:]]
+    if not out:
+        raise RuntimeError("TemplateDict parsed to empty dict. Check first-column values.")
     return out
 
 
