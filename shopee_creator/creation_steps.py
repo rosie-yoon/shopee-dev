@@ -19,7 +19,7 @@ import pandas as pd  # 명시적 임포트
 from .utils_creator import (
     header_key, top_of_category, get_tem_sheet_name,
     with_retry, safe_worksheet, get_env,
-    forward_fill_by_group, # join_url 임포트 삭제됨 (수정 완료)
+    forward_fill_by_group, # join_url 제거됨
     extract_sheet_id, _is_true # 🚨 _is_true 임포트
 )
 
@@ -482,8 +482,8 @@ def run_step_C5_images(
 
     details_count_by_var: Dict[str, int] = {}
     for row in coll_vals[coll_header_row + 1:]:
-        var_no = (row[ci_var] if len(row) > ci_var else "").strip()
-        det    = (row[ci_det] if len(row) > ci_det else "").strip()
+        var_no = (row[ci_var] if ci_var >= 0 and ci_var < len(row) else "").strip()
+        det    = (row[ci_det] if ci_det >= 0 and ci_det < len(row) else "").strip()
         if not var_no:
             continue
         d = _to_int_safe(det, 0) if _is_number_like(det) else 0
