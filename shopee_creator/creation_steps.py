@@ -148,40 +148,46 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
     print("\n[ Create ] Step C2: Build TEM from Collection ...")
     tem_name = get_tem_sheet_name()
 
+    # 1) TemplateDict 로드 (기존 그대로)
     template_dict = _load_template_dict(ref)
     print(f"[C2][DEBUG] TemplateDict loaded. top-level count = {len(template_dict)}")
 
-    coll_ws = safe_worksheet(sh, "Collection")
-    coll_vals = with_retry(lambda: coll_ws.get_all_values()) or []
+    # 2) Collection 탭 유연 탐색 (+ 환경변수 오버라이드 지원)
+    coll_name = get_env("COLLECTION_SHEET_NAME", "Collection")
+    aliases = [coll_name, "collection", "collections", "raw", "sheet1", "상품정보", "상품", "수집", "수집데이터"]
+    try:
+        coll_ws = _find_worksheet_by_alias(sh, aliases)
+    except WorksheetNotFound as e:
+        raise WorksheetNotFound(
+            f"[C2] Could not find Collection tab. tried={aliases}, existing={[w.title for w in sh.worksheets()]}"
+        ) from e
 
-    # [DEBUG] Collection 데이터 유무/헤더 길이 확인
-    print(f"[C2][DEBUG] Collection rows = {len(coll_vals)}"
-          f" (header cols = {len(coll_vals[0]) if coll_vals else 0})")
+    coll_vals = with_retry(lambda: coll_ws.get_all_values()) or []
+    print(f"[C2][DEBUG] Collection rows = {len(coll_vals)} (header cols = {len(coll_vals[0]) if coll_vals else 0})")
 
     if not coll_vals or len(coll_vals) < 2:
         print("[C2] Collection 비어 있음. (rows < 2)")
         return
 
+    # 3) 헤더 인덱스 수집 (기존 로직)
     colmap = _collect_indices(coll_vals[0])
-    # [DEBUG] 주요 컬럼 인덱스 덤프
     print("[C2][DEBUG] colmap =", colmap)
 
-    # 인덱스가 없을 경우 -1을 유지
-    create_i   = colmap["create"]    if colmap["create"]    >= 0 else -1
-    variation_i= colmap["variation"] if colmap["variation"] >= 0 else 1
-    sku_i      = colmap["sku"]       if colmap["sku"]       >= 0 else 2
-    brand_i    = colmap["brand"]     if colmap["brand"]     >= 0 else 3
-    option_i   = colmap["option_eng"]if colmap["option_eng"]>= 0 else 5
-    pname_i    = colmap["prod_name"] if colmap["prod_name"] >= 0 else 7
-    desc_i     = colmap["desc"]      if colmap["desc"]      >= 0 else 9
-    category_i = colmap["category"]  if colmap["category"]  >= 0 else 10
-    dcount_i   = colmap["detail_idx"]if colmap["detail_idx"]>= 0 else 11
-    
-    # create_i가 -1이면 데이터가 없거나 헤더 문제로 처리 불가
+    create_i    = colmap["create"]     if colmap["create"]    >= 0 else -1
+    variation_i = colmap["variation"]  if colmap["variation"] >= 0 else 1
+    sku_i       = colmap["sku"]        if colmap["sku"]       >= 0 else 2
+    brand_i     = colmap["brand"]      if colmap["brand"]     >= 0 else 3
+    option_i    = colmap["option_eng"] if colmap["option_eng"]>= 0 else 5
+    pname_i     = colmap["prod_name"]  if colmap["prod_name"] >= 0 else 7
+    desc_i      = colmap["desc"]       if colmap["desc"]      >= 0 else 9
+    category_i  = colmap["category"]   if colmap["category"]  >= 0 else 10
+    dcount_i    = colmap["detail_idx"] if colmap["detail_idx"]>= 0 else 11
+
     if create_i == -1:
-        print("[C2] ERROR: 'create' column not found (aliases: create, use, apply). Check Collection sheet header.")
+        print("[C2] ERROR: 'create' column not found (aliases: create, use, apply). Check Collection header.")
         return
 
+    # 4) 그룹 별 forward fill (기존 로직)
     fill_cols = [variation_i, brand_i, pname_i, desc_i, category_i, dcount_i]
 
     def _reset_when(row: List[str]) -> bool:
@@ -193,22 +199,16 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
         fill_col_indices=fill_cols,
         reset_when=_reset_when,
     )
-
-    # [DEBUG] forward fill 후 데이터 샘플
     print(f"[C2][DEBUG] forward-filled rows = {len(ff_vals)}")
 
-    # 최종 유효 행 카운트 (디버그 용)
-    create_true_count = sum(
-        1 for r in ff_vals[1:] 
-        if _is_true((r[create_i] if create_i < len(r) else ""))
-    )
+    create_true_count = sum(1 for r in ff_vals[1:] if _is_true((r[create_i] if create_i < len(r) else "")))
     print(f"[C2][DEBUG] Rows where 'create' is True (final check): {create_true_count}")
-    
+
+    # 5) 버킷 빌드 (기존 로직)
     buckets: Dict[str, Dict[str, List]] = {}
     failures: List[List[str]] = []
     category_missing_count = 0
     toplevel_missing_count = 0
-
 
     def set_if_exists(headers: List[str], row: List[str], name: str, value: str):
         idx = _find_col_index([header_key(h) for h in headers], name)
@@ -216,17 +216,13 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
             row[idx] = value
 
     created_rows = 0
-
-    # 실패 시 로그를 바로 출력할 리스트
     failed_categories_log: List[str] = []
 
     for r in range(1, len(ff_vals)):
         row = ff_vals[r]
-        # 🚨 _is_true 함수 사용
         if not _is_true(row[create_i] if create_i < len(row) else ""):
-            continue  # create=False 는 스킵
+            continue
 
-        # 컬럼 값 추출 (인덱스 체크 포함)
         variation = (row[variation_i] if variation_i < len(row) else "").strip()
         sku       = (row[sku_i]       if sku_i       < len(row) else "").strip()
         brand     = (row[brand_i]     if brand_i     < len(row) else "").strip()
@@ -240,21 +236,16 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
             failures.append([pid, "", pname, "CATEGORY_MISSING", f"row={r+1}"])
             category_missing_count += 1
             continue
-        
-        # utils_creator.py에서 수정된 top_of_category 함수를 사용하여 순수 카테고리 이름 추출
-        top_category_raw = top_of_category(category) 
+
+        top_category_raw = top_of_category(category)
         top_norm = header_key(top_category_raw or "")
-        
-        # TemplateDict에서 헤더 매핑 시도
         headers = template_dict.get(top_norm)
 
         if not headers:
-            failures.append(["", category, pname, "TEMPLATE_TOPLEVEL_NOT_FOUND",
-                             f"top={top_category_raw} (Key: {top_norm})"])
+            failures.append(["", category, pname, "TEMPLATE_TOPLEVEL_NOT_FOUND", f"top={top_category_raw} (Key: {top_norm})"])
             toplevel_missing_count += 1
-            # 🚨 [강제 디버그 로그 추가] 매칭 실패한 카테고리를 로그 리스트에 추가
             if top_category_raw not in failed_categories_log:
-                 failed_categories_log.append(f"'{top_category_raw}' (Key: '{top_norm}')")
+                failed_categories_log.append(f"'{top_category_raw}' (Key: '{top_norm}')")
             continue
 
         tem_row = [""] * len(headers)
@@ -273,28 +264,23 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
         b["rows"].append(tem_row)
         created_rows += 1
 
-    # 최종 디버그 로그 출력 (필터링 결과 요약)
     print(f"[C2][DEBUG] Filtered summary: Created={created_rows}, Category Missing={category_missing_count}, Toplevel Not Found={toplevel_missing_count}")
-    print(f"[C2][DEBUG] Total failures (logged to failure list): {len(failures)}")
-
-    # 🚨 [추가된 강제 디버그 로그 출력]
+    print(f"[C2][DEBUG] Total failures: {len(failures)}")
     if failed_categories_log:
-         print("\n[C2][ERROR] TEMPLATE DICT MATCH FAILURES:")
-         for log in failed_categories_log:
-             print(f"  → Missing Top-Level Key: {log}")
-         print("---------------------------------------")
+        print("\n[C2][ERROR] TEMPLATE DICT MATCH FAILURES:")
+        for log in failed_categories_log:
+            print(f"  → Missing Top-Level Key: {log}")
+        print("---------------------------------------")
 
-
+    # 6) TEM_OUTPUT 갱신 (기존 로직)
     out_matrix: List[List[str]] = []
     for top_key, pack in buckets.items():
         out_matrix.append(["PID"] + pack["headers"])
         out_matrix.extend([pid_row + data_row for pid_row, data_row in zip(pack["pids"], pack["rows"])])
-        # [DEBUG] 버킷별 행수
         print(f"[C2][DEBUG] bucket[{top_key}] rows = {len(pack['rows'])}")
 
     if out_matrix:
         tem_ws = safe_worksheet(sh, tem_name)
-        # TEM_OUTPUT 시트 업데이트
         with_retry(lambda: tem_ws.clear())
         max_cols = max(len(r) for r in out_matrix)
         end_a1 = rowcol_to_a1(len(out_matrix), max_cols)
@@ -304,8 +290,8 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
     else:
         print("[C2] out_matrix is empty → TEM_OUTPUT 미갱신 (TemplateDict/Collection 확인 필요)")
 
-    # TODO: failures 기록 시트 처리(필요시)
-    print(f"C2 Done. Buckets: {len(buckets)}")
+    print("C2 Done.")
+
 
 # -------------------------------------------------------------------
 # C3: FDA Registration No. 채우기
@@ -391,140 +377,9 @@ def run_step_C4_prices(sh: gspread.Spreadsheet) -> None:
     pass
 
 
-# === C5 Light: Image URL 채우기 (붙여넣기/통교체용) ===
-# - Base URL을 사전 보정하여 슬래시 오류를 방지합니다.
-# - 시트 접근 시 오류 처리(try/except)를 적용하여 안정성을 확보합니다.
-
-from typing import List, Dict, Tuple
-
-def _key(s: str) -> str:
-    """헤더/키 정규화: 소문자, 공백/언더스코어 제거."""
-    if s is None:
-        return ""
-    return "".join(str(s).strip().lower().replace("_", " ").split())
-
-def _find_header_row_and_offset(tem_values: List[List[str]]) -> Tuple[int, int, Dict[str, int]]:
-    """
-    TEM_OUTPUT에서 헤더 행과 PID 오프셋, 그리고 관심 컬럼 인덱스 맵을 찾는다.
-    - PID가 A열에 있으면 base_offset=1, 아니면 0
-    - 인덱스는 항상 'PID를 제외한' 기준(=데이터 접근 인덱스)으로 보정하여 반환한다.
-      예: 실제 시트 컬럼이 [PID, Category, SKU, ...] 이면, 여기서는 Category가 0, SKU가 1이 된다.
-    """
-    # 요구 컬럼(템플릿 기준) 키
-    WANT = {
-        "variation": {"variationintegrationno.", "variationno.", "variationintegration"},  # Variation Integration No. 포함
-        "sku": {"sku"},
-        "cover": {"coverimage", "coverimageurl", "cover img", "cover"},
-        "ipv": {"imagepervariation", "imageurlpervariation", "image per variation"},
-        # item images: item image 1..8
-    }
-
-    for r, row in enumerate(tem_values):
-        if not row:
-            continue
-        # PID 존재 여부 판단
-        first_key = _key(row[0]) if len(row) > 0 else ""
-        base_offset = 1 if first_key in {"pid"} else 0
-
-        # 헤더 키 배열 (PID 제외 시점부터 만들기)
-        hdr_cells = row[base_offset:]
-        keys = [_key(x) for x in hdr_cells]
-
-        # 필요한 컬럼 후보들을 스캔
-        ix_map: Dict[str, int] = {}
-        # Variation
-        for i, k in enumerate(keys):
-            if k in WANT["variation"]:
-                ix_map["variation"] = i
-                break
-        # SKU
-        for i, k in enumerate(keys):
-            if k in WANT["sku"]:
-                ix_map["sku"] = i
-                break
-        # Cover
-        for i, k in enumerate(keys):
-            if k in WANT["cover"]:
-                ix_map["cover"] = i
-                break
-        # IPv
-        for i, k in enumerate(keys):
-            if k in WANT["ipv"]:
-                ix_map["ipv"] = i
-                break
-        # Item Image 1..8
-        for n in range(1, 9):
-            want = _key(f"item image {n}")
-            for i, k in enumerate(keys):
-                if k == want:
-                    ix_map[f"item{n}"] = i
-                    break
-
-        # 헤더로 판단: 최소한 Variation과 (Cover/IPv/Item 중 하나)는 있어야 함
-        has_variation = "variation" in ix_map
-        has_any_image_col = ("cover" in ix_map) or ("ipv" in ix_map) or any(f"item{n}" in ix_map for n in range(1, 9))
-        if has_variation and has_any_image_col:
-            return r, base_offset, ix_map
-
-    raise RuntimeError("TEM_OUTPUT 헤더 행을 찾지 못했습니다. (Variation/이미지 관련 컬럼이 누락된 듯합니다)")
-
-def _build_details_count_by_var(collection_values: List[List[str]]) -> Dict[str, int]:
-    """
-    Collection 시트에서 Variation/Details Index를 읽어 {variation_no: dcount} 맵을 만든다.
-    - Details Index 별칭을 폭넓게 허용 (C2와 일치 또는 그 이상)
-    """
-    VAR_KEYS = {"variationintegrationno.", "variationno.", "variationintegration", "variation"}
-    DET_KEYS = {
-        "detailsindex", "details", "detailindex",
-        "detailimagecount", "detailscount", "detailcount", "detailimages", "detailimage",
-    }
-
-    if not collection_values:
-        return {}
-
-    # 헤더 행 탐색
-    header_row = 0
-    hdr_keys = [_key(x) for x in collection_values[header_row]]
-    ix_var = ix_det = None
-    for i, k in enumerate(hdr_keys):
-        if ix_var is None and k in VAR_KEYS:
-            ix_var = i
-        if ix_det is None and k in DET_KEYS:
-            ix_det = i
-    if ix_var is None or ix_det is None:
-        # 최소한 하나라도 없으면 아이템 이미지를 못 채우므로 빈 맵
-        return {}
-
-    dmap: Dict[str, int] = {}
-    for row in collection_values[header_row + 1:]:
-        if not row or len(row) <= max(ix_var, ix_det):
-            continue
-        var_no = str(row[ix_var]).strip()
-        det_raw = str(row[ix_det]).strip()
-        if not var_no:
-            continue
-        try:
-            dcount = int(float(det_raw)) if det_raw != "" else 0
-        except ValueError:
-            dcount = 0
-        dcount = max(0, min(8, dcount))  # 0~8로 클램프
-        dmap[var_no] = dcount
-
-    return dmap
-
-def _compose_urls(base_url: str, shop_code: str, var_no: str, sku: str) -> Dict[str, str]:
-    """각 이미지 유형의 URL 패턴을 생성한다."""
-    if not base_url:
-        base_url = ""
-    base = base_url.rstrip("/") + "/"
-
-    urls = {
-        "cover": f"{base}{var_no}_C_{shop_code}.jpg" if var_no and shop_code else "",
-        "ipv": f"{base}{sku}.jpg" if sku else "",
-        # D1..D8은 여기서 만들지 않고 호출부에서 개수에 따라 만듦
-    }
-    return urls
-
+# -------------------------------------------------------------------
+# C5 Light: Image URL 채우기 
+# -------------------------------------------------------------------
 def run_step_C5_images(
     tem_values: List[List[str]],
     collection_values: List[List[str]],
@@ -533,48 +388,47 @@ def run_step_C5_images(
 ) -> List[List[str]]:
     """
     C5: TEM_OUTPUT의 이미지 관련 컬럼(cover, item 1..8, image per variation)을 일괄 채운다.
-    - PID 열 유무에 상관없이 작동
-    - 존재하는 컬럼만 부분 업데이트 (일부 컬럼이 없어도 실패하지 않음)
-    - Details Index는 다양한 별칭을 허용 (C2와 최소 동일 범위)
-    - 반환: 수정된 tem_values (동일 객체를 수정하여 반환)
+    - PID 열 유무 자동 대응
+    - 존재하는 컬럼만 부분 업데이트
+    - Details Index 별칭 확장 (C2와 최소 동일)
     """
     if not tem_values:
         return tem_values
 
+    # 0) base_url 안전 보정
+    base = (base_url or "").rstrip("/") + "/"
+
+    # 1) 헤더/오프셋/컬럼맵
     hdr_row, base_offset, ix_map = _find_header_row_and_offset(tem_values)
+
+    # 2) Collection에서 details 개수 맵
     dmap = _build_details_count_by_var(collection_values)
 
-    # 데이터 행 루프
+    # 3) 데이터 행 채우기
     for r in range(hdr_row + 1, len(tem_values)):
         row = tem_values[r]
-        # 데이터 접근 인덱스는 항상 base_offset 이후부터 시작
         data = row[base_offset:]
-        # 안전 가드
         if not data:
             continue
 
-        # 키 값 가져오기 (없으면 빈 문자열)
         var_no = data[ix_map["variation"]].strip() if "variation" in ix_map and ix_map["variation"] < len(data) else ""
-        sku = data[ix_map["sku"]].strip() if "sku" in ix_map and ix_map["sku"] < len(data) else ""
-
-        urls = _compose_urls(base_url, shop_code, var_no, sku)
+        sku    = data[ix_map["sku"]].strip()       if "sku"       in ix_map and ix_map["sku"]       < len(data) else ""
         dcount = dmap.get(var_no, 0)
 
-        # Cover Image
+        # Cover (base/VAR_C_CODE.jpg) — shop_code 필요
         if "cover" in ix_map and ix_map["cover"] < len(data):
-            data[ix_map["cover"]] = urls["cover"]
+            data[ix_map["cover"]] = f"{base}{var_no}_C_{shop_code}.jpg" if (var_no and shop_code) else ""
 
-        # Image per Variation
+        # IPv (base/SKU.jpg)
         if "ipv" in ix_map and ix_map["ipv"] < len(data):
-            data[ix_map["ipv"]] = urls["ipv"]
+            data[ix_map["ipv"]] = f"{base}{sku}.jpg" if sku else ""
 
-        # Item Image 1..8
+        # D1..D8 (base/VAR_Dn.jpg) — cover에 의존하지 말 것!
         for n in range(1, 9):
             key = f"item{n}"
             if key in ix_map and ix_map[key] < len(data):
-                data[ix_map[key]] = f"{urls['cover'][:-len('_C_'+shop_code+'.jpg')]}_D{n}.jpg" if dcount >= n and var_no else ""
+                data[ix_map[key]] = f"{base}{var_no}_D{n}.jpg" if (var_no and dcount >= n) else ""
 
-        # 다시 원본 행에 써넣기
         tem_values[r] = row[:base_offset] + data
 
     return tem_values
