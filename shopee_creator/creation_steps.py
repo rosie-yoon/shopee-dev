@@ -402,7 +402,7 @@ def run_step_C4_prices(sh: gspread.Spreadsheet) -> None:
 
 from typing import Dict, List, Tuple
 from gspread import Spreadsheet
-from gspread.models import Cell
+from gspread.cell import Cell
 
 def _h(s: str) -> str:
     """헤더 매칭을 위한 키 정규화: 소문자 + 공백/언더스코어 제거"""
