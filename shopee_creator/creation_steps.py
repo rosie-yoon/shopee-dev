@@ -478,6 +478,51 @@ def _find_header_row_and_offset(tem_values: List[List[str]]) -> tuple[int, int, 
         f"예시 행 키: {seen[:15]}"
     )
 
+# C5 전용: Collection에서 Variation별 상세이미지 개수 맵 만들기
+def _build_details_count_by_var(collection_values: List[List[str]]) -> Dict[str, int]:
+    """
+    Collection 시트에서 Details Index를 읽어 {variation_no: dcount}를 만든다.
+    - 헤더 별칭을 폭넓게 허용 (Details Index / Details / Detail Index / Detail Image Count / Details Count ...)
+    - dcount는 0~8로 클램프
+    """
+    VAR_KEYS = {"variationintegrationno.", "variationno.", "variationintegration", "variation"}
+    DET_KEYS = {
+        "detailsindex", "details", "detailindex",
+        "detailimagecount", "detailscount", "detailcount",
+        "detailimages", "detailimage"
+    }
+
+    if not collection_values:
+        return {}
+
+    # 1행: 헤더
+    header = collection_values[0]
+    hdr_keys = [header_key(x) for x in header]
+
+    ix_var = ix_det = None
+    for i, k in enumerate(hdr_keys):
+        if ix_var is None and k in VAR_KEYS: ix_var = i
+        if ix_det is None and k in DET_KEYS: ix_det = i
+
+    if ix_var is None or ix_det is None:
+        # 헤더가 없으면 D이미지 생성을 생략(커버/IPv는 그대로 처리)
+        return {}
+
+    dmap: Dict[str, int] = {}
+    for row in collection_values[1:]:
+        if not row or len(row) <= max(ix_var, ix_det):
+            continue
+        var_no = str(row[ix_var]).strip()
+        det_raw = str(row[ix_det]).strip()
+        if not var_no:
+            continue
+        try:
+            dcount = int(float(det_raw)) if det_raw != "" else 0
+        except ValueError:
+            dcount = 0
+        dmap[var_no] = max(0, min(8, dcount))  # 0~8
+    return dmap
+
 
 # -------------------------------------------------------------------
 # C5: Image URL 채우기 (데이터 버전)
