@@ -548,7 +548,9 @@ def run_step_C5_images(
 
     # gspread는 1-base 인덱스
     start_row = tem_header_row + 2
-    for r_abs, row in enumerate(tem_vals[tem_header_row + 1:], start=start=start_row):
+    for r_abs, row in enumerate(tem_vals[tem_header_row + 1:], start=start_row):
+        # 🚨 [SYNTAX ERROR FIX]: start=start=start_row -> start=start_row로 수정됨.
+        
         # 헤더 인덱스는 0부터, 시트 컬럼 인덱스는 1부터, TEM_OUTPUT 데이터 행은 A열 PID를 포함하므로
         # 컬럼 인덱스 + 1이 데이터 행의 실제 인덱스 (PID 제외)
         var_no = (row[ix_var + 1] if ix_var >= 0 and (ix_var + 1) < len(row) else "").strip()
