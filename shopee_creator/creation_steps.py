@@ -392,13 +392,8 @@ def run_step_C4_prices(sh: gspread.Spreadsheet) -> None:
 
 
 # === C5 Light: Image URL 채우기 (붙여넣기/통교체용) ===
-# - 입력된 base_url, shop_code는 "그대로" 사용 (대소문자/슬래시/공백 등 사용자 입력 보존)
-# - 파일명 규칙에 맞춰 문자열 결합만 수행 (슬래시 자동 추가/변경 없음)
-# - Details Index에 따라 Item Image 1..8의 유효 개수만 채우고, 나머지는 공란으로 초기화
-# - TEM_OUTPUT의 Variation No / SKU를 그대로 사용
-#
-# 필요 패키지: gspread
-# 사용 시: controller에서 run_step_C5_images_light(sh, base_url, shop_code) 호출
+# - Base URL을 사전 보정하여 슬래시 오류를 방지합니다.
+# - 시트 접근 시 오류 처리(try/except)를 적용하여 안정성을 확보합니다.
 
 from typing import Dict, List, Tuple
 from gspread import Spreadsheet
@@ -436,31 +431,34 @@ def run_step_C5_images(
     shop_code: str,
 ) -> Dict[str, object]:
     """
-    C5 Light 구현
+    C5 Light 구현 (Base URL 사전 보정 방식 적용)
 
     규칙(파일명은 모두 .jpg 고정):
       1) Cover Image         = base_url + {VariationNo}_C_{shop_code}.jpg
       2) Item Image 1..8     = base_url + {VariationNo}_D{1..8}.jpg
                                단, Collection!L(Details Index) 개수까지만 채우고 초과분은 공란
       3) Image per Variation = base_url + {SKU}.jpg
-
-    주의:
-      - base_url / shop_code는 사용자가 입력한 그대로 사용 (대소문자/슬래시 강제 변경 없음)
-      - 문자열을 "그대로" 결합하므로, base_url에 마지막 '/'가 필요하면 사용자가 직접 포함해야 함
-      - 재실행해도 동일 결과가 되도록 초과 D칸은 항상 공란으로 초기화
-
-    반환값: 요약 리포트(dict)
     """
 
+    # ✅ [수정된 핵심 로직]: Base URL에 슬래시(/)가 없는 경우 강제로 추가하여 안전하게 결합되도록 보정
+    if not base_url.endswith("/"):
+        base_url += "/"
+        print(f"[C5][DEBUG] Base URL trailing slash added: {base_url}")
+        
     report = {
         "updated_cells": 0,
         "skipped_rows_missing_keys": 0,
         "warnings": [],
     }
 
-    # --- 1) Collection에서 Details Index 맵 만들기 ---
-    coll_ws = sh.worksheet("Collection")
-    coll_vals = coll_ws.get_all_values()
+    # --- 1) Collection에서 Details Index 맵 만들기 (안정화) ---
+    try:
+        # safe_worksheet + with_retry를 사용하여 시트 접근 시 안정성 확보
+        coll_ws = safe_worksheet(sh, "Collection")
+        coll_vals = with_retry(lambda: coll_ws.get_all_values())
+    except Exception as e:
+        report["warnings"].append(f"Collection 시트 로드 실패: {e}")
+        return report
 
     # 헤더 탐색(상단 10행에서)
     coll_header_row = None
@@ -489,15 +487,18 @@ def run_step_C5_images(
         if not var_no:
             continue
         d = _to_int_safe(det, 0) if _is_number_like(det) else 0
-        if d < 0:  # 음수 방지
-            d = 0
-        if d > 8:  # 최대 8장
-            d = 8
+        if d < 0: d = 0
+        if d > 8: d = 8
         details_count_by_var[var_no] = d
 
-    # --- 2) TEM_OUTPUT에서 필요한 컬럼 인덱스 찾기 ---
-    tem_ws = sh.worksheet("TEM_OUTPUT")
-    tem_vals = tem_ws.get_all_values()
+    # --- 2) TEM_OUTPUT에서 필요한 컬럼 인덱스 찾기 (안정화) ---
+    try:
+        # safe_worksheet + with_retry를 사용하여 시트 접근 시 안정성 확보
+        tem_ws = safe_worksheet(sh, "TEM_OUTPUT")
+        tem_vals = with_retry(lambda: tem_ws.get_all_values())
+    except Exception as e:
+        report["warnings"].append(f"TEM_OUTPUT 시트 로드 실패: {e}")
+        return report
 
     tem_header_row = None
     required_groups = [
@@ -527,7 +528,7 @@ def run_step_C5_images(
     ix_cover = _find_idx(headers, "Cover Image", "CoverImage")
     ix_ipv   = _find_idx(headers, "Image per Variation", "ImagePerVariation")
 
-    # Item Image 1..8 (다양한 표기 대응)
+    # Item Image 1..8
     ix_items: List[int] = []
     for i in range(1, 9):
         idx = _find_idx(headers, f"Item Image {i}", f"ItemImage{i}", f"item_image_{i}")
@@ -551,29 +552,32 @@ def run_step_C5_images(
         # 3-1) Cover: base_url + "{var_no}_C_{shop_code}.jpg"
         if ix_cover >= 0 and var_no:
             cover_name = f"{var_no}_C_{shop_code}.jpg"
-            cover_url  = f"{base_url}{cover_name}"  # ✅ 입력 그대로 결합 (슬래시 강제 없음)
+            # ✅ [수정된 결합]: 사전 보정된 base_url을 단순 결합
+            cover_url  = f"{base_url}{cover_name}"
             updates.append(Cell(row=r_abs, col=ix_cover + 1, value=cover_url))
             report["updated_cells"] += 1
 
         # 3-2) Item Image 1..8
         dcount = details_count_by_var.get(var_no, 0)
         if var_no and var_no not in details_count_by_var:
-            # TEM_OUTPUT에는 있는데 Collection에는 없는 키
             missing_in_collection.append((r_abs, var_no))
         for i, col_idx in enumerate(ix_items, start=1):
+            # ✅ [수정된 결합]: 사전 보정된 base_url을 단순 결합
             val = f"{base_url}{var_no}_D{i}.jpg" if (var_no and i <= dcount) else ""
             updates.append(Cell(row=r_abs, col=col_idx + 1, value=val))
             report["updated_cells"] += 1
 
         # 3-3) Image per Variation: base_url + "{sku}.jpg"
         if ix_ipv >= 0 and sku:
+            # ✅ [수정된 결합]: 사전 보정된 base_url을 단순 결합
             ipv_url = f"{base_url}{sku}.jpg"
             updates.append(Cell(row=r_abs, col=ix_ipv + 1, value=ipv_url))
             report["updated_cells"] += 1
 
     # --- 4) 배치 업데이트 ---
     if updates:
-        tem_ws.update_cells(updates, value_input_option="USER_ENTERED")
+        # with_retry를 사용하여 API 호출 시 안정성 확보
+        with_retry(lambda: tem_ws.update_cells(updates, value_input_option="USER_ENTERED"))
 
     # --- 5) 경고/요약 구성 ---
     if missing_in_collection:

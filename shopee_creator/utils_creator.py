@@ -22,25 +22,6 @@ import gspread
 from gspread.exceptions import WorksheetNotFound
 from dotenv import load_dotenv
 
-# --- add to shopee_creator/utils_creator.py ---
-from urllib.parse import urljoin as _urljoin
-
-def join_url(base: str, *parts: str) -> str:
-    """
-    Base URL 뒤에 여러 경로 조각을 안전하게 이어붙입니다.
-    - base는 끝에 / 보장
-    - 각 part는 앞의 / 제거
-    - urljoin 특성을 이용해 중복 슬래시/상대 경로 정리
-    """
-    url = (base or "").rstrip("/") + "/"
-    for p in parts:
-        if not p:
-            continue
-        s = str(p).lstrip("/")
-        url = _urljoin(url, s)
-    return url
-# --- end add ---
-
 
 # Streamlit / Google Auth (서비스계정)
 try:
