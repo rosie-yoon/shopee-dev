@@ -462,8 +462,12 @@ def run_step_C5_images(
         return report
 
     coll_headers = coll_vals[coll_header_row]
-    ci_var = _find_col_index([header_key(h) for h in coll_headers], "Variation Integration No.", ["Variation No.", "Variation Integration"])
-    ci_det = _find_find_col_index([header_key(h) for h in coll_headers], "Details Index", ["Details", "Detail Index"])
+    # NOTE: _find_col_index는 keys 리스트를 첫 번째 인자로 받으므로, 헤더 정규화 리스트를 생성해야 합니다.
+    coll_keys = [header_key(h) for h in coll_headers]
+    
+    # 🚨 실수로 다른 헬퍼 함수가 호출되었을 가능성을 방지하기 위해 _find_col_index만 사용합니다.
+    ci_var = _find_col_index(coll_keys, "Variation Integration No.", ["Variation No.", "Variation Integration"])
+    ci_det = _find_col_index(coll_keys, "Details Index", ["Details", "Detail Index"])
 
     if ci_var < 0 or ci_det < 0:
         report["warnings"].append("Collection 시트에 필요한 컬럼(Variation/Details Index)이 없습니다.")
@@ -506,7 +510,7 @@ def run_step_C5_images(
             continue
         has_all = True
         for grp in required_groups:
-            # 🚨 _find_idx 대신 _find_col_index 사용을 위해 헤더 정규화 필요
+            # _find_col_index를 사용하여 헤더 행 매칭 시도
             if _find_col_index([header_key(h) for h in row], grp[0], list(grp[1:])) < 0:
                 has_all = False
                 break
@@ -544,11 +548,11 @@ def run_step_C5_images(
 
     # gspread는 1-base 인덱스
     start_row = tem_header_row + 2
-    for r_abs, row in enumerate(tem_vals[tem_header_row + 1:], start=start_row):
+    for r_abs, row in enumerate(tem_vals[tem_header_row + 1:], start=start=start_row):
         # 헤더 인덱스는 0부터, 시트 컬럼 인덱스는 1부터, TEM_OUTPUT 데이터 행은 A열 PID를 포함하므로
         # 컬럼 인덱스 + 1이 데이터 행의 실제 인덱스 (PID 제외)
-        var_no = (row[ix_var] if ix_var >= 0 and ix_var < len(row) else "").strip()
-        sku    = (row[ix_sku] if ix_sku >= 0 and ix_sku < len(row) else "").strip()
+        var_no = (row[ix_var + 1] if ix_var >= 0 and (ix_var + 1) < len(row) else "").strip()
+        sku    = (row[ix_sku + 1] if ix_sku >= 0 and (ix_sku + 1) < len(row) else "").strip()
         rows_processed += 1
 
         if not var_no and not sku:
@@ -559,7 +563,7 @@ def run_step_C5_images(
         if ix_cover >= 0 and var_no:
             cover_name = f"{var_no}_C_{shop_code}.jpg"
             cover_url  = f"{base_url}{cover_name}"
-            updates.append(Cell(row=r_abs, col=ix_cover + 1, value=cover_url))
+            updates.append(Cell(row=r_abs, col=ix_cover + 2, value=cover_url)) # +2 (PID, Category skip)
             report["updated_cells"] += 1
 
         # 3-2) Item Image 1..8
@@ -568,13 +572,13 @@ def run_step_C5_images(
             missing_in_collection.append((r_abs, var_no))
         for i, col_idx in enumerate(ix_items, start=1):
             val = f"{base_url}{var_no}_D{i}.jpg" if (var_no and i <= dcount) else ""
-            updates.append(Cell(row=r_abs, col=col_idx + 1, value=val))
+            updates.append(Cell(row=r_abs, col=col_idx + 2, value=val)) # +2
             report["updated_cells"] += 1
 
         # 3-3) Image per Variation: base_url + "{sku}.jpg"
         if ix_ipv >= 0 and sku:
             ipv_url = f"{base_url}{sku}.jpg"
-            updates.append(Cell(row=r_abs, col=ix_ipv + 1, value=ipv_url))
+            updates.append(Cell(row=r_abs, col=ix_ipv + 2, value=ipv_url)) # +2
             report["updated_cells"] += 1
 
     # --- 4) 배치 업데이트 ---
@@ -600,7 +604,6 @@ def run_step_C5_images(
 # -------------------------------------------------------------------
 # C6: Stock/Weight/Brand 보정 (MARGIN 시트 기반)
 # -------------------------------------------------------------------
-# (이하 C6, Export helpers는 생략)
 
 def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet) -> None:
     print("\n[ Create ] Step C6: Fill Stock, Weight, Brand ...")
@@ -695,12 +698,154 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet) -> None:
 
     print(f"C6 Done. Updates: {len(updates)} cells")
 
+
 # -------------------------------------------------------------------
 # Export helpers (xlsx / csv)
 # -------------------------------------------------------------------
-# (export_tem_xlsx, export_tem_csv, 호환용 별칭 코드는 생략하고 파일 끝까지 붙여넣으십시오.)
-# ...
-# ...
+
+def export_tem_xlsx(sh: gspread.Spreadsheet) -> Optional[BytesIO]:
+    """
+    TEM_OUTPUT 시트를 TopLevel Category 단위로 분할하여 Excel(xlsx) 파일 반환.
+    - A열 PID 제거, Category 형식 정규화 포함.
+    """
+    if not sh:
+        return None
+    tem_name = get_tem_sheet_name()
+    try:
+        tem_ws = safe_worksheet(sh, tem_name)
+    except WorksheetNotFound:
+        return None
+
+    all_data = with_retry(lambda: tem_ws.get_all_values())
+    if not all_data:
+        return None
+
+    # pandas DataFrame을 사용하여 데이터 처리
+    df = pd.DataFrame(all_data)
+    # 모든 셀을 문자열로 변환 (혼합 타입을 방지)
+    for c in df.columns:
+        df[c] = df[c].astype(str)
+    
+    # 헤더 행 인덱스 찾기 (B열='Category'인 행)
+    header_mask = df.iloc[:, 1].str.lower().eq("category")
+    header_indices = df.index[header_mask].tolist()
+    if not header_indices:
+        print("[!] TEM_OUTPUT 헤더 행(Category)을 찾을 수 없습니다.")
+        return None
+
+    output = BytesIO()
+    
+    # xlsxwriter 엔진 임포트 시도
+    try:
+        import xlsxwriter  # noqa: F401
+        engine = "xlsxwriter"
+    except ImportError:
+        try:
+            import openpyxl  # noqa: F401
+            engine = "openpyxl"
+        except ImportError:
+            print("[!] xlsx 생성용 라이브러리(xlsxwriter/openpyxl)가 없습니다.")
+            return None
+
+    with pd.ExcelWriter(output, engine=engine) as writer:
+        for i, header_index in enumerate(header_indices):
+            # 데이터 시작 행 (헤더 다음 행)
+            start_row = header_index + 1
+            # 데이터 끝 행 (다음 헤더 행이거나 데이터프레임의 끝)
+            end_row = header_indices[i + 1] if i + 1 < len(header_indices) else len(df)
+            if start_row >= end_row:
+                continue
+
+            # 헤더 행 데이터 (A열 PID 제외, B열부터 시작)
+            header_row = df.iloc[header_index, 1:]
+            # 데이터 청크 (A열 PID 제외, B열부터 시작, 시작 행부터 끝 행까지)
+            chunk_df = df.iloc[start_row:end_row, 1:].copy()
+
+            # Category 표준화 (첫 번째 데이터 컬럼이 Category 컬럼일 경우)
+            if not chunk_df.empty and chunk_df.shape[1] > 0 and header_key(header_row.iloc[0]) == "category":
+                # 카테고리 중간 공백 및 하이픈 정규화
+                chunk_df.iloc[:, 0] = chunk_df.iloc[:, 0].astype(str).str.replace(r"\s*-\s*", "-", regex=True)
+
+            # 컬럼 이름 설정 (헤더 행 사용)
+            columns = header_row.astype(str).tolist()
+            if len(columns) != chunk_df.shape[1]:
+                # 컬럼 개수가 맞지 않을 경우 보정
+                if len(columns) < chunk_df.shape[1]:
+                    columns += [f"col_{k}" for k in range(len(columns), chunk_df.shape[1])]
+                else:
+                    columns = columns[: chunk_df.shape[1]]
+            chunk_df.columns = columns
+
+            # 시트 이름 설정 (Top-level Category 기반)
+            cat_col_name = next((c for c in columns if c.lower() == "category"), None)
+            first_cat = str(chunk_df.iloc[0][cat_col_name]) if (cat_col_name and not chunk_df.empty) else "UNKNOWN"
+            top_level_name = top_of_category(first_cat) or "UNKNOWN"
+            # 시트 이름은 31자 제한 및 특수문자 제거
+            sheet_name = re.sub(r"[\s/\\*?:\\[\\]]", "_", str(top_level_name).title())[:31]
+
+            # 엑셀 파일에 쓰기
+            chunk_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    output.seek(0)
+    print("Final template file generated successfully (xlsx).")
+    return output
+
+
+def export_tem_csv(sh: gspread.Spreadsheet) -> Optional[bytes]:
+    """
+    TEM_OUTPUT 시트를 CSV(bytes)로 반환.
+    - A열 PID 제거 및 Category 정규화 포함.
+    """
+    if not sh:
+        return None
+    try:
+        ws = safe_worksheet(sh, "TEM_OUTPUT")
+        vals = with_retry(lambda: ws.get_all_values()) or []
+        if not vals:
+            return None
+
+        processed_vals = []
+        current_headers = None
+        for row in vals:
+            # 헤더 행 찾기 (B열='Category'인 행)
+            if (row[1] if len(row) > 1 else "").strip().lower() == "category":
+                current_headers = row[1:]
+                processed_vals.append(current_headers)
+                continue
+            
+            # 데이터 행 처리 (PID A열 제거)
+            if current_headers and len(row) > 1:
+                data_row = row[1:]
+                # 카테고리 정규화 (B열부터 시작하는 데이터에서 0번째 인덱스는 Category)
+                if len(data_row) > 0 and header_key(current_headers[0]) == "category":
+                    data_row[0] = re.sub(r"\s*-\s*", "-", data_row[0])
+                processed_vals.append(data_row)
+            elif len(row) > 0:
+                # 헤더가 아닌 행 중 데이터가 있는 행 (PID만 남을 경우)
+                processed_vals.append(row[1:])
+
+        if not processed_vals:
+            return None
+            
+        # CSV 인코딩 (UTF-8 with BOM)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerows(processed_vals)
+        return buf.getvalue().encode("utf-8-sig")
+    except Exception as e:
+        print(f"[WARN] TEM_OUTPUT CSV 변환 실패: {e}")
+        return None
+
+
+# -------------------------------------------------------------------
+# 호환용 별칭 (기존 호출부가 기대하는 이름)
+# -------------------------------------------------------------------
+run_c1_collect = run_step_C1
+run_c2_tem = run_step_C2
+run_c3_fda = run_step_C3_fda
+run_c4_price = run_step_C4_prices
 run_c5_images = run_step_C5_images
+run_c6_swb = run_step_C6_stock_weight_brand
+
 def run_c5_images(sh, base_url, shop_code):
     return run_step_C5_images(sh=sh, base_url=base_url, shop_code=shop_code)
