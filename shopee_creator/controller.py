@@ -6,10 +6,15 @@ import traceback
 import json
 import gspread
 from google.oauth2.service_account import Credentials
-# utils_creator에서 with_retry와 extract_sheet_id를 가져옴
-from .utils_creator import with_retry, extract_sheet_id 
 
+from .utils_creator import with_retry, extract_sheet_id
 from . import creation_steps as steps  # C1~C6 & export helpers
+
+
+# ---- module-level helper -----------------------------------------------------
+def _raise_missing(what: str):
+    # Streamlit에서 보기 좋은 메시지로 즉시 중단
+    raise RuntimeError(f"[C5] {what}이(가) 설정되지 않았습니다. 페이지에서 set_image_base()를 먼저 호출하세요.")
 
 
 @dataclass
@@ -21,38 +26,48 @@ class StepLog:
 
 
 class ShopeeCreator:
-    """
-    - secrets로부터 서비스계정 JSON/REFERENCE_SPREADSHEET_ID를 읽어 gspread 클라이언트(`self.gs`)를 준비
-    - run(input_sheet_url=...) 호출 시 C1~C6 순차 실행
-    - 페이지에서 export가 필요하면, self.gs로 스프레드시트를 열어 넘겨주면 됩니다.
-    """
     def __init__(self, secrets):
-        self.secrets = secrets or {}
-        self.gs = self._build_gspread_client()
-        self.ref_url = self._get_reference_url()
+        self.secrets = secrets
 
-        # 이미지 base URL (있으면 보관; C5 단계에서 필요 시 전달)
-        self.cover_base_url: Optional[str] = None
-        self.details_base_url: Optional[str] = None
-        self.option_base_url: Optional[str] = None
+        # gspread 클라이언트/레퍼런스 URL 준비
+        self.gs = self._build_gspread_client()
+        self.ref_url: Optional[str] = self._get_reference_url()
+        self._current_sh = None
+
+        # ✅ C5에서 사용하는 입력값(요구사항: 입력 그대로 사용, 보정 없음)
+        self._image_base_url: Optional[str] = None
         self.shop_code: Optional[str] = None
 
-    # --- public helpers -------------------------------------------------
+        # (구버전 호환용) 멀티 베이스 보관 필드 — 현재는 미사용
+        self.cover_base_url = None
+        self.details_base_url = None
+        self.option_base_url = None
+
+    # ---- C5용 입력 세팅 -------------------------------------------------------
+    def set_image_base(self, base_url: str, shop_code: str) -> None:
+        """Base URL/Shop Code를 입력 그대로 보관 (대소문자/슬래시 보정 절대 금지)."""
+        self._image_base_url = base_url
+        self.shop_code = shop_code
+
+    # (구버전 호환) 여러 베이스를 받던 세터
     def set_image_bases(self, *, cover: str, details: str, option: str, shop_code: str):
         self.cover_base_url = cover
         self.details_base_url = details
         self.option_base_url = option
         self.shop_code = shop_code
 
-    # --- core -----------------------------------------------------------
+    # ---- 실행 파이프라인 ------------------------------------------------------
     def run(self, *, input_sheet_url: str) -> List[StepLog]:
         logs: List[StepLog] = []
 
-        # 열기
+        # 입력 시트 오픈
         sh = with_retry(lambda: self.gs.open_by_url(input_sheet_url))
+        self._current_sh = sh
+
+        # 레퍼런스 시트 오픈
         ref = self._open_ref_sheet()
 
-        # 👇 [DEBUG] 추가 (정확히 여기)
+        # 디버그 (원하면 주석처리)
         print("[DEBUG] sh.title =", getattr(sh, "title", None), "| sh.id =", getattr(sh, "id", None))
         print("[DEBUG] ref.title =", getattr(ref, "title", None), "| ref.id =", getattr(ref, "id", None))
         print("[DEBUG] same_book? ", getattr(sh, "id", None) == getattr(ref, "id", None))
@@ -62,10 +77,11 @@ class ShopeeCreator:
             ("C2 Collection → TEM",  lambda: steps.run_step_C2(sh, ref)),
             ("C3 FDA Fill",          lambda: steps.run_step_C3_fda(sh, ref)),
             ("C4 Prices",            lambda: steps.run_step_C4_prices(sh)),
+            # ✅ C5: creation_steps.run_step_C5_images 사용 (입력 그대로 전달)
             ("C5 Images",            lambda: steps.run_step_C5_images(
                 sh=sh,
-                base_url=self._image_base_url,  # ✅ 입력 그대로 넘김 (정규화 X)
-                shop_code=self.shop_code,       # ✅ 입력 그대로 넘김 (정규화 X)
+                base_url=(self._image_base_url if self._image_base_url is not None else _raise_missing("Image Base URL")),
+                shop_code=(self.shop_code      if self.shop_code      is not None else _raise_missing("Shop Code")),
             )),
             ("C6 Stock/Weight/Brand",lambda: steps.run_step_C6_stock_weight_brand(sh)),
         ]
@@ -76,52 +92,33 @@ class ShopeeCreator:
                 logs.append(StepLog(name=name, ok=True))
             except Exception as e:
                 logs.append(StepLog(name=name, ok=False, error=f"{e}\n{traceback.format_exc()}"))
-                break  # 실패 시 중단 (원하면 계속 진행으로 바꿀 수 있음)
+                break  # 실패 시 파이프라인 중단 (원하면 계속 진행으로 변경 가능)
 
         return logs
 
-    # --- internals ------------------------------------------------------
-    def _run_c5_images(self):
-        # C5는 우리가 클린본에서 아직 미구현(pass) 상태입니다.
-        # 이미지 베이스가 세팅되어 있다면 여기서 전달하도록 뼈대만 둡니다.
-        sh = None  # 필요 시 self.gs.open_by_url(...) 으로 가져오도록 확장 가능
-        if all([self.cover_base_url, self.details_base_url, self.option_base_url, self.shop_code]):
-            # 구현 완료 시 아래처럼 연결:
-            # steps.run_step_C5_images(
-            #     sh,
-            #     shop_code=self.shop_code,
-            #     cover_base_url=self.cover_base_url,
-            #     details_base_url=self.details_base_url,
-            #     option_base_url=self.option_base_url,
-            # )
-            return
-        # 아직 넘길 값이 없으면 스킵
-        return
-
+    # ---- internals ------------------------------------------------------------
     def _open_ref_sheet(self):
         url = self.ref_url
         if not url:
+            # secrets에 ID/URL 어느 형태든 하나는 있어야 함
             raise RuntimeError("REFERENCE_SPREADSHEET_ID (or REF_URL) is not set in secrets.")
-        
-        # URL에서 ID만 추출하도록 수정 (500 에러 방지)
-        sheet_id = extract_sheet_id(url)
 
-        # with_retry 적용 (500 Internal Error 방지)
+        # URL 또는 ID 처리
+        sheet_id = extract_sheet_id(url)
+        # URL이면 open_by_url, ID만이면 open_by_key
         if url.startswith("http"):
             return with_retry(lambda: self.gs.open_by_url(url))
-        
-        # id만 있으면 key로 오픈 (with_retry 적용)
         return with_retry(lambda: self.gs.open_by_key(sheet_id))
 
-    def _get_reference_url(self) -> str | None:
-        s = self.secrets
+    def _get_reference_url(self) -> Optional[str]:
+        s = self.secrets or {}
         sid = s.get("REFERENCE_SPREADSHEET_ID")
         if sid:
             sid = str(sid).strip()
-            # URL 그대로 넣어도 허용
-            if sid.startswith("http"):
+            if sid:
+                # URL 그대로 넣어도 허용
                 return sid
-            return sid  # id는 open_by_key에서 사용
+
         # 폴백 키들
         for v in (
             s.get("REF_SHEET_URL"),
@@ -130,16 +127,14 @@ class ShopeeCreator:
             (s.get("refs") or {}).get("sheet_url") if isinstance(s.get("refs"), dict) else None,
         ):
             if v:
-                return str(v)
+                return str(v).strip()
         return None
 
     def _build_gspread_client(self):
-        # secrets에 JSON 문자열 혹은 dict 로 저장된 서비스 계정 키 기대
         s = self.secrets or {}
         creds_json = s.get("GOOGLE_SERVICE_ACCOUNT_JSON") or s.get("google_service_account_json")
         if not creds_json:
-            # Streamlit Cloud 에서는 st.secrets에 dict 형태로 들어올 수 있음
-            # 없으면 환경변수/기본 인증 등으로 확장 가능
+            # Streamlit Cloud에서는 st.secrets에 dict로 들어올 수 있음
             raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is missing in secrets.")
 
         if isinstance(creds_json, str):
@@ -149,8 +144,7 @@ class ShopeeCreator:
                 raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not a valid JSON string.")
         else:
             info = creds_json  # already dict
-            
-        # [AUTH_CHECK] 디버그 로그 추가
+
         client_email = info.get("client_email", "N/A")
         print(f"[AUTH_CHECK] Authenticating as service account: {client_email}")
 
@@ -160,3 +154,7 @@ class ShopeeCreator:
         ]
         creds = Credentials.from_service_account_info(info, scopes=scopes)
         return gspread.authorize(creds)
+
+    # (과거 미구현 메서드 - 현재 파이프라인에서 직접 호출하므로 사용 안 함)
+    def _run_c5_images(self):
+        return
