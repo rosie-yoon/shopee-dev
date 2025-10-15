@@ -50,6 +50,11 @@ class ShopeeCreator:
         sh = self.gs.open_by_url(input_sheet_url)
         ref = self._open_ref_sheet()
 
+        # 👇 [DEBUG] 추가 (정확히 여기)
+        print("[DEBUG] sh.title =", getattr(sh, "title", None), "| sh.id =", getattr(sh, "id", None))
+        print("[DEBUG] ref.title =", getattr(ref, "title", None), "| ref.id =", getattr(ref, "id", None))
+        print("[DEBUG] same_book? ", getattr(sh, "id", None) == getattr(ref, "id", None))
+
         pipeline = [
             ("C1 Prepare TEM_OUTPUT", lambda: steps.run_step_C1(sh, ref)),
             ("C2 Collection → TEM",  lambda: steps.run_step_C2(sh, ref)),

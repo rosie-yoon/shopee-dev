@@ -66,6 +66,11 @@ def _load_template_dict(ref: gspread.Spreadsheet) -> Dict[str, List[str]]:
     ref_sheet = get_env("TEMPLATE_DICT_SHEET_NAME", "TemplateDict")
     ws = safe_worksheet(ref, ref_sheet)
     vals = with_retry(lambda: ws.get_all_values()) or []
+
+    # 👇 [DEBUG] 추가
+    print(f"[TDict][DEBUG] ref='{ref.title}' tab='{ref_sheet}' rows={len(template_vals)}")
+    print("[TDict][DEBUG] tabs in ref (head):", [w.title for w in ref.worksheets()][:10])
+
     out: Dict[str, List[str]] = {}
     for r in vals[1:]:
         if not r or not (r[0] or "").strip():
@@ -195,6 +200,11 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
 
         top_norm = header_key(top_of_category(category) or "")
         headers = template_dict.get(top_norm)
+
+        # headers = template_dict.get(top_norm) 계산 직전/직후에
+        print("[C2][DEBUG] raw category:", category, "→ top:", top_of_category(category))
+        print("[C2][DEBUG] lookup key:", header_key(top_of_category(category)), "∈", list(template_dict.keys())[:8])
+
         if not headers:
             failures.append(["", category, pname, "TEMPLATE_TOPLEVEL_NOT_FOUND",
                              f"top={top_of_category(category)}"])
