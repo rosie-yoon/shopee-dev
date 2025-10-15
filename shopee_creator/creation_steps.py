@@ -19,7 +19,7 @@ import pandas as pd  # 명시적 임포트
 from .utils_creator import (
     header_key, top_of_category, get_tem_sheet_name,
     with_retry, safe_worksheet, get_env,
-    join_url, forward_fill_by_group,
+    forward_fill_by_group, # join_url 임포트 삭제됨
     extract_sheet_id, _is_true # 🚨 _is_true 임포트
 )
 
@@ -589,6 +589,7 @@ def run_step_C5_images(
         )
 
     return report
+
 
 # -------------------------------------------------------------------
 # C6: Stock/Weight/Brand 보정 (MARGIN 시트 기반)
