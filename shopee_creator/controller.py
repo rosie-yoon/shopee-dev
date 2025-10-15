@@ -62,7 +62,7 @@ class ShopeeCreator:
             ("C2 Collection → TEM",  lambda: steps.run_step_C2(sh, ref)),
             ("C3 FDA Fill",          lambda: steps.run_step_C3_fda(sh, ref)),
             ("C4 Prices",            lambda: steps.run_step_C4_prices(sh)),
-            ("C5 Images",            lambda: steps.run_step_C5_images_light(
+            ("C5 Images",            lambda: steps.run_step_C5_images(
                 sh=sh,
                 base_url=self._image_base_url,  # ✅ 입력 그대로 넘김 (정규화 X)
                 shop_code=self.shop_code,       # ✅ 입력 그대로 넘김 (정규화 X)

@@ -430,7 +430,7 @@ def _to_int_safe(s: str, default: int = 0) -> int:
     except Exception:
         return default
 
-def run_step_C5_images_light(
+def run_step_C5_images(
     sh: Spreadsheet,
     base_url: str,
     shop_code: str,
@@ -831,3 +831,6 @@ run_c3_fda = run_step_C3_fda
 run_c4_price = run_step_C4_prices
 run_c5_images = run_step_C5_images
 run_c6_swb = run_step_C6_stock_weight_brand
+
+def run_c5_images(sh, base_url, shop_code):
+    return run_step_C5_images(sh=sh, base_url=base_url, shop_code=shop_code)
