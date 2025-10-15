@@ -20,7 +20,7 @@ from .utils_creator import (
     header_key, top_of_category, get_tem_sheet_name,
     with_retry, safe_worksheet, get_env,
     join_url, forward_fill_by_group,
-    extract_sheet_id, # controller에서 사용하지 않지만 필요시 추가
+    extract_sheet_id, _is_true # 🚨 _is_true 임포트
 )
 
 # -------------------------------------------------------------------
@@ -123,10 +123,6 @@ def _collect_indices(header_row: List[str]) -> Dict[str, int]:
     }
 
 
-def _is_true(v: str) -> bool:
-    return str(v or "").strip().lower() in ("true", "t", "1", "y", "yes", "✔", "✅")
-
-
 # -------------------------------------------------------------------
 # C1: TEM_OUTPUT 시트 준비/초기화
 # -------------------------------------------------------------------
@@ -226,6 +222,7 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
 
     for r in range(1, len(ff_vals)):
         row = ff_vals[r]
+        # 🚨 _is_true 함수 사용
         if not _is_true(row[create_i] if create_i < len(row) else ""):
             continue  # create=False 는 스킵
 
@@ -327,9 +324,10 @@ def run_step_C3_fda(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet, overwrite
         # A열 카테고리 로드
         fda_vals_2d = with_retry(lambda: fda_ws.get_values("A:A", value_render_option="UNFORMATTED_VALUE"))
         # 로드된 카테고리 리스트를 정규화하여 셋(set)으로 만듦
+        # 🚨 TEM_OUTPUT의 값과 동일하게 정규화
         target_categories = {str(r[0]).strip().lower() for r in (fda_vals_2d or []) if r and str(r[0]).strip()}
     except Exception as e:
-        print(f"[!] '{fda_sheet_name}' 탭 로드 실패: {e}. Step C3 건너뜀.")
+        print(f"[!] '{fda_sheet_name}' 탭 로드 실패: {e}. Step C3 건너<binary data, 2 bytes><binary data, 2 bytes><binary data, 2 bytes>니다.")
         return
 
     try:
@@ -364,8 +362,8 @@ def run_step_C3_fda(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet, overwrite
         # Category 값 추출 (헤더 제외한 데이터 행의 인덱스 기준)
         category_val_raw = (row[col_category_B + 1] if len(row) > (col_category_B + 1) else "").strip()
         
-        # 카테고리 정규화 (TemplateDict에서 쓰는 형식과 동일해야 함)
-        category_val_normalized = top_of_category(category_val_raw).lower()
+        # 카테고리 정규화 (전체 경로를 소문자로 사용)
+        category_val_normalized = category_val_raw.lower()
 
         # FDA 대상 카테고리인지 확인
         if category_val_normalized and category_val_normalized in target_categories:

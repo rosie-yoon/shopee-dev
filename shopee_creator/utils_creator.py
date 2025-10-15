@@ -6,7 +6,7 @@ utils_common.py (MASTER VERSION - All required functions included)
 - gspread 인증 (authorize_gspread)
 - 문자열/헤더 정규화 유틸
 - Google Sheets 접근 유틸 (with_retry, safe_worksheet)
-- [NEW] 신규 생성(item_creator) 지원 유틸 (get_env, forward_fill_by_group 등)
+- 신규 생성(item_creator) 지원 유틸 (get_env, forward_fill_by_group 등)
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import re
 import time
 import random
 from pathlib import Path
-from typing import Optional, List, Dict, Callable, Iterable, Sequence
+from typing import Optional, List, Dict, Callable, Iterable, Sequence, Any # Any 추가
 
 import gspread
 from gspread.exceptions import WorksheetNotFound
@@ -132,9 +132,27 @@ def header_key(s: str) -> str:
     return re.sub(r"[\W_]+", "", str(s or "").lower())
 
 def top_of_category(s: str) -> str:
-    """카테고리 문자열에서 최상위 카테고리만 추출 (예: 'Food & Beverages/A/B' -> 'Food & Beverages')"""
-    parts = str(s or "").strip().split("/")
-    return parts[0].strip() if parts else ""
+    """
+    카테고리 문자열에서 최상위 카테고리만 추출합니다. 
+    (예: '101643 - Beauty/Makeup/Lips/Lip Gloss' -> 'Beauty')
+    """
+    # 1. 문자열 전체에서 슬래시 주변 공백 제거
+    normalized_s = re.sub(r'\s*/\s*', '/', str(s or "").strip())
+    # 2. 첫 번째 슬래시까지만 자름
+    parts = normalized_s.split("/", 1)
+    
+    if not parts or not parts[0].strip():
+        return ""
+    
+    top_part = parts[0].strip()
+    
+    # 3. "101643 - Beauty" 패턴에서 숫자 코드와 하이픈 제거
+    # \s*-\s* 대신 더 명확하게 \s+-\s+ 또는 \s*-\s*를 사용 (현재는 \s*-\s*가 적용되어 있음)
+    match = re.match(r'^\s*\d+\s*-\s*(.*)', top_part)
+    if match:
+        return match.group(1).strip()
+        
+    return top_part # 숫자 코드가 없는 경우 그대로 반환
 
 def get_tem_sheet_name() -> str:
     """TEM_OUTPUT 시트 이름"""
@@ -186,6 +204,18 @@ def safe_worksheet(sh: gspread.Spreadsheet, title: str) -> gspread.Worksheet:
 # =============================
 # 신규 생성(item_creator) 지원 유틸
 # =============================
+
+def _is_true(v: Any) -> bool: # v의 타입을 Any로 변경
+    """
+    gspread에서 읽어온 값이 True인지 확인 (불리언, 문자열 'TRUE', 't', '1', '✔' 등 포함)
+    """
+    if isinstance(v, bool):
+        return v
+    
+    s = str(v or "").strip().lower()
+    return s in ("true", "t", "1", "y", "yes", "✔", "✅")
+
+
 def forward_fill_by_group(
     data: Sequence[List[str]],
     group_idx: int,
