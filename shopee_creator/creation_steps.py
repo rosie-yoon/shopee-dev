@@ -402,10 +402,116 @@ def run_step_C5_images(
     details_base_url: str,
     option_base_url: str,
 ) -> None:
-    print("\n[ Create ] Step C5: Images (Skipped/Placeholder)")
-    # TODO: 기존 creator 규칙 유지 + base URL만 공용화하여 적용
-    # - join_url() 사용 권장
-    pass
+    print("\n[ Create ] Step C5: Fill Image URLs ...")
+    tem_name = get_tem_sheet_name()
+    
+    try:
+        tem_ws = safe_worksheet(sh, tem_name)
+        tem_vals = with_retry(lambda: tem_ws.get_all_values()) or []
+    except WorksheetNotFound:
+        print(f"[C5] {tem_name} 탭 없음. Step C1/C2 선행 필요.")
+        return
+
+    if not tem_vals:
+        print("[C5] TEM_OUTPUT 비어 있음.")
+        return
+
+    updates: List[Cell] = []
+    cur_headers = None
+    
+    # 템플릿 헤더 컬럼 인덱스 (B열부터 시작)
+    idx_t_cover = idx_t_img_var = idx_t_sku = idx_t_var_integ = -1
+    
+    # Collection 탭에서 Details Index 값을 가져오기 위한 준비
+    coll_ws = safe_worksheet(sh, "Collection")
+    coll_vals = with_retry(lambda: coll_ws.get_all_values()) or []
+    
+    # Collection 헤더 및 데이터 준비 (A열부터 시작)
+    coll_header = coll_vals[0] if coll_vals else []
+    coll_data = coll_vals[1:] if coll_vals else []
+    
+    coll_keys = [header_key(h) for h in coll_header]
+    idx_coll_var_integ = _find_col_index(coll_keys, "variation") # Variation Integration No.가 Collection에 있는 컬럼
+    idx_coll_dcount = _find_col_index(coll_keys, "detail_idx", ["details index", "detail index"]) # L열의 Details Index
+    
+    # Collection의 Variation Integration No. (키)와 Details Index (값) 매핑
+    # Variation이 없는 경우 (Item-level), SKu/PID를 키로 사용하거나, 컬럼 A/B를 사용하여 고유 그룹을 찾아야 함
+    # C2에서 Variation Integration No.를 Collection의 variation 컬럼에서 가져오므로, variation을 키로 사용
+    coll_var_to_dcount: Dict[str, int] = {}
+    if idx_coll_var_integ >= 0 and idx_coll_dcount >= 0:
+        for row in coll_data:
+            var_integ_no = (row[idx_coll_var_integ] if idx_coll_var_integ < len(row) else "").strip()
+            dcount_str = (row[idx_coll_dcount] if idx_coll_dcount < len(row) else "").strip()
+            try:
+                dcount = int(dcount_str)
+                if var_integ_no and dcount > 0:
+                    coll_var_to_dcount[var_integ_no] = dcount
+            except ValueError:
+                continue
+
+    
+    # TEM_OUTPUT 순회
+    for r0, row in enumerate(tem_vals):
+        # 헤더 행 찾기 (B열='Category'인 행)
+        if (row[1] if len(row) > 1 else "").strip().lower() == "category":
+            cur_headers = [header_key(h) for h in row[1:]]
+            idx_t_cover = _find_col_index(cur_headers, "coverimage")
+            idx_t_img_var = _find_col_index(cur_headers, "imagepervariation")
+            idx_t_sku = _find_col_index(cur_headers, "sku")
+            idx_t_var_integ = _find_col_index(cur_headers, "variationintegration") # TEM_OUTPUT에 이미 채워져 있음
+            
+            # Item Image 1~8 컬럼 인덱스 수집
+            idx_t_item_imgs = []
+            for i in range(1, 9):
+                 idx = _find_col_index(cur_headers, f"itemimage{i}", [f"item image {i}"])
+                 if idx >= 0:
+                     idx_t_item_imgs.append(idx)
+            
+            continue
+
+        if not cur_headers or idx_t_var_integ == -1 or idx_t_sku == -1:
+            continue
+
+        # TEM_OUTPUT에서 필요한 값 추출 (시트 인덱스: 헤더 인덱스 + 2)
+        var_integ_no = (row[idx_t_var_integ + 1] if len(row) > idx_t_var_integ + 1 else "").strip()
+        sku_val = (row[idx_t_sku + 1] if len(row) > idx_t_sku + 1 else "").strip()
+        
+        # URL 생성에 사용할 코드 결정 (Variation Integration No. 또는 SKU)
+        url_code = var_integ_no # 1, 2번 규칙에 사용
+        
+        if not url_code:
+            continue
+
+        # 1. Cover Image (Variation Integration No.+_C.jpg)
+        if idx_t_cover != -1:
+            url = join_url(cover_base_url, f"{url_code}_C.jpg")
+            updates.append(Cell(row=r0 + 1, col=idx_t_cover + 2, value=url))
+
+        # 2. Item Image 1-8 (Variation Integration No.+_D1-8.jpg)
+        if idx_coll_var_integ >= 0 and idx_coll_dcount >= 0: # Collection 정보가 있다면
+            # Collection에서 Details Index (Dcount) 값 가져오기
+            dcount = coll_var_to_dcount.get(var_integ_no, 0)
+            
+            # dcount 수만큼 Item Image URL 생성
+            for i, idx_img in enumerate(idx_t_item_imgs):
+                if i < dcount:
+                    # Item Image (Details Index 기준)
+                    url = join_url(details_base_url, f"{url_code}_D{i+1}.jpg")
+                    updates.append(Cell(row=r0 + 1, col=idx_img + 2, value=url))
+                else:
+                    # Details Index를 초과하는 컬럼은 클리어
+                    updates.append(Cell(row=r0 + 1, col=idx_img + 2, value=""))
+
+        # 3. Image per Variation (SKU.jpg)
+        if idx_t_img_var != -1 and sku_val:
+            url = join_url(option_base_url, f"{sku_val}.jpg")
+            updates.append(Cell(row=r0 + 1, col=idx_t_img_var + 2, value=url))
+
+    if updates:
+        with_retry(lambda: tem_ws.update_cells(updates, value_input_option="RAW"))
+
+    print(f"C5 Done. Image URLs applied: {len(updates)} cells.")
+
 
 
 # -------------------------------------------------------------------
