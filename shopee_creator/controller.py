@@ -138,6 +138,15 @@ class ShopeeCreator:
         else:
             info = creds_json  # already dict
 
+        # ---------------------------------------------------
+        # 👇 [수정] 인증된 서비스 계정 이메일 확인을 위한 코드 추가
+        client_email = info.get("client_email")
+        if client_email:
+             print(f"[AUTH_CHECK] Authenticating as service account: {client_email}")
+        else:
+             print("[AUTH_CHECK] client_email not found in service account JSON.")
+        # ---------------------------------------------------
+
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive.readonly",
