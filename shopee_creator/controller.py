@@ -6,10 +6,10 @@ import traceback
 import json
 import gspread
 from google.oauth2.service_account import Credentials
+# utils_creator에서 with_retry와 extract_sheet_id를 가져옴
+from .utils_creator import with_retry, extract_sheet_id 
 
 from . import creation_steps as steps  # C1~C6 & export helpers
-# 👇 [수정] utils_creator에서 sheet ID 추출 유틸리티와 with_retry를 임포트합니다.
-from .utils_creator import extract_sheet_id, with_retry
 
 
 @dataclass
@@ -49,8 +49,8 @@ class ShopeeCreator:
         logs: List[StepLog] = []
 
         # 열기
-        sh = self.gs.open_by_url(input_sheet_url)
-        ref = self._open_ref_sheet() # 이제 이 함수에 with_retry가 적용됩니다.
+        sh = with_retry(lambda: self.gs.open_by_url(input_sheet_url))
+        ref = self._open_ref_sheet()
 
         # 👇 [DEBUG] 추가 (정확히 여기)
         print("[DEBUG] sh.title =", getattr(sh, "title", None), "| sh.id =", getattr(sh, "id", None))
@@ -99,23 +99,25 @@ class ShopeeCreator:
         if not url:
             raise RuntimeError("REFERENCE_SPREADSHEET_ID (or REF_URL) is not set in secrets.")
         
+        # URL에서 ID만 추출하도록 수정 (500 에러 방지)
         sheet_id = extract_sheet_id(url)
+
+        # with_retry 적용 (500 Internal Error 방지)
+        if url.startswith("http"):
+            return with_retry(lambda: self.gs.open_by_url(url))
         
-        # 👇 [수정] open_by_key 호출에 with_retry를 적용합니다.
-        result = with_retry(lambda: self.gs.open_by_key(sheet_id))
-        
-        if result is None:
-            raise RuntimeError(f"Failed to open Reference Sheet (ID: {sheet_id}) after multiple retries.")
-            
-        return result
+        # id만 있으면 key로 오픈 (with_retry 적용)
+        return with_retry(lambda: self.gs.open_by_key(sheet_id))
 
     def _get_reference_url(self) -> str | None:
         s = self.secrets
         sid = s.get("REFERENCE_SPREADSHEET_ID")
         if sid:
             sid = str(sid).strip()
-            # URL 또는 ID 모두 허용
-            return sid
+            # URL 그대로 넣어도 허용
+            if sid.startswith("http"):
+                return sid
+            return sid  # id는 open_by_key에서 사용
         # 폴백 키들
         for v in (
             s.get("REF_SHEET_URL"),
@@ -143,15 +145,10 @@ class ShopeeCreator:
                 raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not a valid JSON string.")
         else:
             info = creds_json  # already dict
-
-        # ---------------------------------------------------
-        # 👇 [수정] 인증된 서비스 계정 이메일 확인을 위한 코드 추가
-        client_email = info.get("client_email")
-        if client_email:
-             print(f"[AUTH_CHECK] Authenticating as service account: {client_email}")
-        else:
-             print("[AUTH_CHECK] client_email not found in service account JSON.")
-        # ---------------------------------------------------
+            
+        # [AUTH_CHECK] 디버그 로그 추가
+        client_email = info.get("client_email", "N/A")
+        print(f"[AUTH_CHECK] Authenticating as service account: {client_email}")
 
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",

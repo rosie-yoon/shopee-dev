@@ -221,6 +221,9 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
 
     created_rows = 0
 
+    # 실패 시 로그를 바로 출력할 리스트
+    failed_categories_log: List[str] = []
+
     for r in range(1, len(ff_vals)):
         row = ff_vals[r]
         if not _is_true(row[create_i] if create_i < len(row) else ""):
@@ -252,6 +255,9 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
             failures.append(["", category, pname, "TEMPLATE_TOPLEVEL_NOT_FOUND",
                              f"top={top_category_raw} (Key: {top_norm})"])
             toplevel_missing_count += 1
+            # 🚨 [강제 디버그 로그 추가] 매칭 실패한 카테고리를 로그 리스트에 추가
+            if top_category_raw not in failed_categories_log:
+                 failed_categories_log.append(f"'{top_category_raw}' (Key: '{top_norm}')")
             continue
 
         tem_row = [""] * len(headers)
@@ -273,6 +279,13 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
     # 최종 디버그 로그 출력 (필터링 결과 요약)
     print(f"[C2][DEBUG] Filtered summary: Created={created_rows}, Category Missing={category_missing_count}, Toplevel Not Found={toplevel_missing_count}")
     print(f"[C2][DEBUG] Total failures (logged to failure list): {len(failures)}")
+
+    # 🚨 [추가된 강제 디버그 로그 출력]
+    if failed_categories_log:
+         print("\n[C2][ERROR] TEMPLATE DICT MATCH FAILURES:")
+         for log in failed_categories_log:
+             print(f"  → Missing Top-Level Key: {log}")
+         print("---------------------------------------")
 
 
     out_matrix: List[List[str]] = []
