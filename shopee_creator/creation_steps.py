@@ -391,128 +391,200 @@ def run_step_C4_prices(sh: gspread.Spreadsheet) -> None:
     pass
 
 
-# -------------------------------------------------------------------
-# C5: 이미지 URL 채우기 (Option/Cover/Details)
-# -------------------------------------------------------------------
+# === C5 Light: Image URL 채우기 (붙여넣기/통교체용) ===
+# - 입력된 base_url, shop_code는 "그대로" 사용 (대소문자/슬래시/공백 등 사용자 입력 보존)
+# - 파일명 규칙에 맞춰 문자열 결합만 수행 (슬래시 자동 추가/변경 없음)
+# - Details Index에 따라 Item Image 1..8의 유효 개수만 채우고, 나머지는 공란으로 초기화
+# - TEM_OUTPUT의 Variation No / SKU를 그대로 사용
+#
+# 필요 패키지: gspread
+# 사용 시: controller에서 run_step_C5_images_light(sh, base_url, shop_code) 호출
 
-def run_step_C5_images(
-    sh: gspread.Spreadsheet,
-    shop_code: str,
-    cover_base_url: str,
-    details_base_url: str,
-    option_base_url: str,
-) -> None:
-    print("\n[ Create ] Step C5: Fill Image URLs ...")
-    tem_name = get_tem_sheet_name()
-    
+from typing import Dict, List, Tuple
+from gspread import Spreadsheet
+from gspread.models import Cell
+
+def _h(s: str) -> str:
+    """헤더 매칭을 위한 키 정규화: 소문자 + 공백/언더스코어 제거"""
+    return (s or "").strip().lower().replace(" ", "").replace("_", "")
+
+def _find_idx(headers: List[str], *candidates: str) -> int:
+    """headers에서 후보명들 중 하나를 찾으면 인덱스 반환, 없으면 -1"""
+    keys = [_h(h) for h in headers]
+    for c in candidates:
+        k = _h(c)
+        if k in keys:
+            return keys.index(k)
+    return -1
+
+def _is_number_like(s: str) -> bool:
     try:
-        tem_ws = safe_worksheet(sh, tem_name)
-        tem_vals = with_retry(lambda: tem_ws.get_all_values()) or []
-    except WorksheetNotFound:
-        print(f"[C5] {tem_name} 탭 없음. Step C1/C2 선행 필요.")
-        return
+        float(s)
+        return True
+    except Exception:
+        return False
 
-    if not tem_vals:
-        print("[C5] TEM_OUTPUT 비어 있음.")
-        return
+def _to_int_safe(s: str, default: int = 0) -> int:
+    try:
+        return int(float(s))
+    except Exception:
+        return default
 
+def run_step_C5_images_light(
+    sh: Spreadsheet,
+    base_url: str,
+    shop_code: str,
+) -> Dict[str, object]:
+    """
+    C5 Light 구현
+
+    규칙(파일명은 모두 .jpg 고정):
+      1) Cover Image         = base_url + {VariationNo}_C_{shop_code}.jpg
+      2) Item Image 1..8     = base_url + {VariationNo}_D{1..8}.jpg
+                               단, Collection!L(Details Index) 개수까지만 채우고 초과분은 공란
+      3) Image per Variation = base_url + {SKU}.jpg
+
+    주의:
+      - base_url / shop_code는 사용자가 입력한 그대로 사용 (대소문자/슬래시 강제 변경 없음)
+      - 문자열을 "그대로" 결합하므로, base_url에 마지막 '/'가 필요하면 사용자가 직접 포함해야 함
+      - 재실행해도 동일 결과가 되도록 초과 D칸은 항상 공란으로 초기화
+
+    반환값: 요약 리포트(dict)
+    """
+
+    report = {
+        "updated_cells": 0,
+        "skipped_rows_missing_keys": 0,
+        "warnings": [],
+    }
+
+    # --- 1) Collection에서 Details Index 맵 만들기 ---
+    coll_ws = sh.worksheet("Collection")
+    coll_vals = coll_ws.get_all_values()
+
+    # 헤더 탐색(상단 10행에서)
+    coll_header_row = None
+    for r, row in enumerate(coll_vals[:10]):
+        row_keys = [_h(c) for c in row]
+        has_var = any(k in row_keys for k in ("variationintegrationno", "variationintegration", "variationno"))
+        has_det = any(k in row_keys for k in ("detailsindex", "details", "detailindex"))
+        if has_var and has_det:
+            coll_header_row = r
+            break
+    if coll_header_row is None:
+        report["warnings"].append("Collection 시트에서 헤더(Variation/Details Index)를 찾지 못했습니다.")
+        return report
+
+    coll_headers = coll_vals[coll_header_row]
+    ci_var = _find_idx(coll_headers, "Variation Integration No.", "Variation No.", "Variation Integration")
+    ci_det = _find_idx(coll_headers, "Details Index", "Details", "Detail Index")
+    if ci_var < 0 or ci_det < 0:
+        report["warnings"].append("Collection 시트에 필요한 컬럼(Variation/Details Index)이 없습니다.")
+        return report
+
+    details_count_by_var: Dict[str, int] = {}
+    for row in coll_vals[coll_header_row + 1:]:
+        var_no = (row[ci_var] if len(row) > ci_var else "").strip()
+        det    = (row[ci_det] if len(row) > ci_det else "").strip()
+        if not var_no:
+            continue
+        d = _to_int_safe(det, 0) if _is_number_like(det) else 0
+        if d < 0:  # 음수 방지
+            d = 0
+        if d > 8:  # 최대 8장
+            d = 8
+        details_count_by_var[var_no] = d
+
+    # --- 2) TEM_OUTPUT에서 필요한 컬럼 인덱스 찾기 ---
+    tem_ws = sh.worksheet("TEM_OUTPUT")
+    tem_vals = tem_ws.get_all_values()
+
+    tem_header_row = None
+    required_groups = [
+        ("Variation Integration No.", "Variation No.", "Variation Integration"),
+        ("SKU",),
+        ("Cover Image", "CoverImage"),
+        ("Image per Variation", "ImagePerVariation"),
+    ]
+    for r, row in enumerate(tem_vals[:10]):
+        if not row:
+            continue
+        has_all = True
+        for grp in required_groups:
+            if _find_idx(row, *grp) < 0:
+                has_all = False
+                break
+        if has_all:
+            tem_header_row = r
+            break
+    if tem_header_row is None:
+        report["warnings"].append("TEM_OUTPUT 시트의 헤더를 찾지 못했습니다.")
+        return report
+
+    headers = tem_vals[tem_header_row]
+    ix_var  = _find_idx(headers, "Variation Integration No.", "Variation No.", "Variation Integration")
+    ix_sku  = _find_idx(headers, "SKU")
+    ix_cover = _find_idx(headers, "Cover Image", "CoverImage")
+    ix_ipv   = _find_idx(headers, "Image per Variation", "ImagePerVariation")
+
+    # Item Image 1..8 (다양한 표기 대응)
+    ix_items: List[int] = []
+    for i in range(1, 9):
+        idx = _find_idx(headers, f"Item Image {i}", f"ItemImage{i}", f"item_image_{i}")
+        if idx >= 0:
+            ix_items.append(idx)
+
+    # --- 3) 업데이트 배치 구성 ---
     updates: List[Cell] = []
-    cur_headers = None
-    
-    # 템플릿 헤더 컬럼 인덱스 (B열부터 시작)
-    idx_t_cover = idx_t_img_var = idx_t_sku = idx_t_var_integ = -1
-    
-    # Collection 탭에서 Details Index 값을 가져오기 위한 준비
-    coll_ws = safe_worksheet(sh, "Collection")
-    coll_vals = with_retry(lambda: coll_ws.get_all_values()) or []
-    
-    # Collection 헤더 및 데이터 준비 (A열부터 시작)
-    coll_header = coll_vals[0] if coll_vals else []
-    coll_data = coll_vals[1:] if coll_vals else []
-    
-    coll_keys = [header_key(h) for h in coll_header]
-    idx_coll_var_integ = _find_col_index(coll_keys, "variation") # Variation Integration No.가 Collection에 있는 컬럼
-    idx_coll_dcount = _find_col_index(coll_keys, "detail_idx", ["details index", "detail index"]) # L열의 Details Index
-    
-    # Collection의 Variation Integration No. (키)와 Details Index (값) 매핑
-    # Variation이 없는 경우 (Item-level), SKu/PID를 키로 사용하거나, 컬럼 A/B를 사용하여 고유 그룹을 찾아야 함
-    # C2에서 Variation Integration No.를 Collection의 variation 컬럼에서 가져오므로, variation을 키로 사용
-    coll_var_to_dcount: Dict[str, int] = {}
-    if idx_coll_var_integ >= 0 and idx_coll_dcount >= 0:
-        for row in coll_data:
-            var_integ_no = (row[idx_coll_var_integ] if idx_coll_var_integ < len(row) else "").strip()
-            dcount_str = (row[idx_coll_dcount] if idx_coll_dcount < len(row) else "").strip()
-            try:
-                dcount = int(dcount_str)
-                if var_integ_no and dcount > 0:
-                    coll_var_to_dcount[var_integ_no] = dcount
-            except ValueError:
-                continue
+    missing_in_collection: List[Tuple[int, str]] = []  # (row_no, var_no)
 
-    
-    # TEM_OUTPUT 순회
-    for r0, row in enumerate(tem_vals):
-        # 헤더 행 찾기 (B열='Category'인 행)
-        if (row[1] if len(row) > 1 else "").strip().lower() == "category":
-            cur_headers = [header_key(h) for h in row[1:]]
-            idx_t_cover = _find_col_index(cur_headers, "coverimage")
-            idx_t_img_var = _find_col_index(cur_headers, "imagepervariation")
-            idx_t_sku = _find_col_index(cur_headers, "sku")
-            idx_t_var_integ = _find_col_index(cur_headers, "variationintegration") # TEM_OUTPUT에 이미 채워져 있음
-            
-            # Item Image 1~8 컬럼 인덱스 수집
-            idx_t_item_imgs = []
-            for i in range(1, 9):
-                 idx = _find_col_index(cur_headers, f"itemimage{i}", [f"item image {i}"])
-                 if idx >= 0:
-                     idx_t_item_imgs.append(idx)
-            
+    # gspread는 1-base 인덱스
+    start_row = tem_header_row + 2
+    for r_abs, row in enumerate(tem_vals[tem_header_row + 1:], start=start_row):
+        var_no = (row[ix_var] if ix_var >= 0 and ix_var < len(row) else "").strip()
+        sku    = (row[ix_sku] if ix_sku >= 0 and ix_sku < len(row) else "").strip()
+
+        if not var_no and not sku:
+            report["skipped_rows_missing_keys"] += 1
             continue
 
-        if not cur_headers or idx_t_var_integ == -1 or idx_t_sku == -1:
-            continue
+        # 3-1) Cover: base_url + "{var_no}_C_{shop_code}.jpg"
+        if ix_cover >= 0 and var_no:
+            cover_name = f"{var_no}_C_{shop_code}.jpg"
+            cover_url  = f"{base_url}{cover_name}"  # ✅ 입력 그대로 결합 (슬래시 강제 없음)
+            updates.append(Cell(row=r_abs, col=ix_cover + 1, value=cover_url))
+            report["updated_cells"] += 1
 
-        # TEM_OUTPUT에서 필요한 값 추출 (시트 인덱스: 헤더 인덱스 + 2)
-        var_integ_no = (row[idx_t_var_integ + 1] if len(row) > idx_t_var_integ + 1 else "").strip()
-        sku_val = (row[idx_t_sku + 1] if len(row) > idx_t_sku + 1 else "").strip()
-        
-        # URL 생성에 사용할 코드 결정 (Variation Integration No. 또는 SKU)
-        url_code = var_integ_no # 1, 2번 규칙에 사용
-        
-        if not url_code:
-            continue
+        # 3-2) Item Image 1..8
+        dcount = details_count_by_var.get(var_no, 0)
+        if var_no and var_no not in details_count_by_var:
+            # TEM_OUTPUT에는 있는데 Collection에는 없는 키
+            missing_in_collection.append((r_abs, var_no))
+        for i, col_idx in enumerate(ix_items, start=1):
+            val = f"{base_url}{var_no}_D{i}.jpg" if (var_no and i <= dcount) else ""
+            updates.append(Cell(row=r_abs, col=col_idx + 1, value=val))
+            report["updated_cells"] += 1
 
-        # 1. Cover Image (Variation Integration No.+_C.jpg)
-        if idx_t_cover != -1:
-            url = join_url(cover_base_url, f"{url_code}_C.jpg")
-            updates.append(Cell(row=r0 + 1, col=idx_t_cover + 2, value=url))
+        # 3-3) Image per Variation: base_url + "{sku}.jpg"
+        if ix_ipv >= 0 and sku:
+            ipv_url = f"{base_url}{sku}.jpg"
+            updates.append(Cell(row=r_abs, col=ix_ipv + 1, value=ipv_url))
+            report["updated_cells"] += 1
 
-        # 2. Item Image 1-8 (Variation Integration No.+_D1-8.jpg)
-        if idx_coll_var_integ >= 0 and idx_coll_dcount >= 0: # Collection 정보가 있다면
-            # Collection에서 Details Index (Dcount) 값 가져오기
-            dcount = coll_var_to_dcount.get(var_integ_no, 0)
-            
-            # dcount 수만큼 Item Image URL 생성
-            for i, idx_img in enumerate(idx_t_item_imgs):
-                if i < dcount:
-                    # Item Image (Details Index 기준)
-                    url = join_url(details_base_url, f"{url_code}_D{i+1}.jpg")
-                    updates.append(Cell(row=r0 + 1, col=idx_img + 2, value=url))
-                else:
-                    # Details Index를 초과하는 컬럼은 클리어
-                    updates.append(Cell(row=r0 + 1, col=idx_img + 2, value=""))
-
-        # 3. Image per Variation (SKU.jpg)
-        if idx_t_img_var != -1 and sku_val:
-            url = join_url(option_base_url, f"{sku_val}.jpg")
-            updates.append(Cell(row=r0 + 1, col=idx_t_img_var + 2, value=url))
-
+    # --- 4) 배치 업데이트 ---
     if updates:
-        with_retry(lambda: tem_ws.update_cells(updates, value_input_option="RAW"))
+        tem_ws.update_cells(updates, value_input_option="USER_ENTERED")
 
-    print(f"C5 Done. Image URLs applied: {len(updates)} cells.")
+    # --- 5) 경고/요약 구성 ---
+    if missing_in_collection:
+        miss_preview = [f"r{r}:{v}" for r, v in missing_in_collection[:10]]
+        if len(missing_in_collection) > 10:
+            miss_preview.append(f"...(+{len(missing_in_collection)-10} more)")
+        report["warnings"].append(
+            "Collection에 없는 Variation No.가 TEM_OUTPUT에 존재합니다: " + ", ".join(miss_preview)
+        )
 
-
+    return report
 
 # -------------------------------------------------------------------
 # C6: Stock/Weight/Brand 보정 (MARGIN 시트 기반)
