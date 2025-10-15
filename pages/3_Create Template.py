@@ -155,11 +155,11 @@ if st.session_state.get("RUN_TRIGGERED") and st.session_state.SHOP_CODE:
 
     try:
         ctrl = ShopeeCreator(st.secrets)
-        ctrl.set_image_bases(
-            base_url=base_url,
-            shop_code=shop_code,
-        )
-        
+        ctrl = ShopeeCreator(st.secrets)
+        ctrl.set_image_base(  # 단수 세터로 교체
+            base_url=base_url,   # 입력값 그대로 사용 (슬래시/대소문자 보정 없음)
+            shop_code=shop_code  # 입력값 그대로 사용
+        )       
         results = []
         # ctrl.run() 내부 로직을 재구성하여 단계별로 실행 및 업데이트
         
