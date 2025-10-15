@@ -22,6 +22,10 @@ import gspread
 from gspread.exceptions import WorksheetNotFound
 from dotenv import load_dotenv
 
+# --- add to shopee_creator/utils_creator.py ---
+# join_url 관련 임포트 및 함수 제거됨
+# --- end add ---
+
 
 # Streamlit / Google Auth (서비스계정)
 try:
@@ -29,7 +33,7 @@ try:
     from google.oauth2.service_account import Credentials
 except Exception:  # 로컬 스크립트 실행 등
     st = None  # type: ignore
-    Credentials = None  # type: ignore
+    Credentials = None  # type ignore
 
 # =============================
 # 환경 변수 & .env 로딩
@@ -128,7 +132,6 @@ def top_of_category(s: str) -> str:
     top_part = parts[0].strip()
     
     # 3. "101643 - Beauty" 패턴에서 숫자 코드와 하이픈 제거
-    # \s*-\s* 대신 더 명확하게 \s+-\s+ 또는 \s*-\s*를 사용 (현재는 \s*-\s*가 적용되어 있음)
     match = re.match(r'^\s*\d+\s*-\s*(.*)', top_part)
     if match:
         return match.group(1).strip()
@@ -152,7 +155,7 @@ def extract_sheet_id(url_or_id: str) -> str:
     if not url_or_id:
         raise ValueError("빈 시트 URL/ID 입니다.")
     try:
-        # URL에서 ID 추출 패턴: /d/<ID>/edit
+        # URL에서 ID 추출 패턴: /d/<ID>
         m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url_or_id)
         if m:
             return m.group(1)
