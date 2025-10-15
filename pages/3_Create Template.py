@@ -156,10 +156,8 @@ if st.session_state.get("RUN_TRIGGERED") and st.session_state.SHOP_CODE:
     try:
         ctrl = ShopeeCreator(st.secrets)
         ctrl.set_image_bases(
+            base_url=base_url,
             shop_code=shop_code,
-            cover=base_url,
-            details=base_url,
-            option=base_url
         )
         
         results = []
