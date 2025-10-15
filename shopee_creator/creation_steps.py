@@ -368,83 +368,116 @@ def run_step_C4_prices(sh: gspread.Spreadsheet) -> None:
 def _find_header_row_and_offset(tem_values: List[List[str]]) -> tuple[int, int, Dict[str, int]]:
     """
     TEM_OUTPUT에서 헤더 행과 PID 오프셋, 관심 컬럼 인덱스 맵을 찾는다.
-    반환 인덱스는 항상 'PID 제외 기준'으로 통일한다.
+    - 헤더 행 판정 전략을 다층으로 완화:
+      1) 기존 방식(맨 앞 'PID' 유무)
+      2) B열이 'Category'인 행을 헤더로 간주
+      3) base_offset=0/1 양쪽을 모두 시도
+    - 컬럼 매칭은 alias를 폭넓게 허용
+    - Variation이 없어도 SKU가 있으면 IPv만 부분 업데이트 가능하도록 허용(커버/D이미지는 Variation 필요)
+    반환 인덱스는 항상 'PID를 제외한 기준'으로 통일한다.
     """
+    if not tem_values:
+        raise RuntimeError("TEM_OUTPUT이 비어 있습니다.")
+
+    # 폭넓은 alias 집합
     WANT = {
-        "variation": {"variationintegrationno.", "variationno.", "variationintegration"},
-        "sku": {"sku"},
-        "cover": {"coverimage", "cover image", "coverimageurl", "cover"},
-        "ipv": {"imagepervariation", "image per variation", "imageurlpervariation"},
+        "variation": {
+            "variationintegrationno", "variationintegrationno.", "variationno", "variationintegration", "variation",
+            "variation integration no", "variation integration", "variation code", "variation id"
+        },
+        "sku": {"sku", "seller_sku", "seller sku", "item sku"},
+        "cover": {
+            "coverimage", "cover image", "coverimageurl", "cover image url", "cover", "cover url"
+        },
+        "ipv": {
+            "imagepervariation", "image per variation",
+            "imageurlpervariation", "image url per variation",
+            "ipv", "variation image", "image each variation"
+        },
     }
 
-    for r, row in enumerate(tem_values or []):
+    def _try_parse_row_as_header(row: List[str], base_offset_guess: int) -> Optional[Dict[str, int]]:
+        keys = [header_key(x) for x in row[base_offset_guess:]]
+        if not keys:
+            return None
+        ix_map: Dict[str, int] = {}
+
+        # helper: 포함 여부 검사
+        def _first_index(matchers: set[str]) -> int:
+            # 정확 일치 우선
+            for i, k in enumerate(keys):
+                if k in matchers:
+                    return i
+            # 부분 일치 허용
+            for i, k in enumerate(keys):
+                if any(m for m in matchers if m and m in k):
+                    return i
+            return -1
+
+        # variation / sku / cover / ipv
+        vi = _first_index(WANT["variation"])
+        if vi != -1: ix_map["variation"] = vi
+        si = _first_index(WANT["sku"])
+        if si != -1: ix_map["sku"] = si
+        ci = _first_index(WANT["cover"])
+        if ci != -1: ix_map["cover"] = ci
+        ii = _first_index(WANT["ipv"])
+        if ii != -1: ix_map["ipv"] = ii
+
+        # item image 1..8 (정확 매칭 우선, 그다음 부분)
+        for n in range(1, 9):
+            want_exact = header_key(f"item image {n}")
+            found = -1
+            for i, k in enumerate(keys):
+                if k == want_exact:
+                    found = i
+                    break
+            if found == -1:
+                for i, k in enumerate(keys):
+                    if want_exact in k:
+                        found = i
+                        break
+            if found != -1:
+                ix_map[f"item{n}"] = found
+
+        # 이 행을 헤더로 인정할 조건:
+        has_any_image = ("cover" in ix_map) or ("ipv" in ix_map) or any(f"item{n}" in ix_map for n in range(1, 9))
+        has_key_for_fill = ("variation" in ix_map) or ("sku" in ix_map)  # 최소한 하나는 있어야 채울 수 있음
+
+        return ix_map if (has_any_image and has_key_for_fill) else None
+
+    # 1) 1차: 기존 로직(맨 앞 'PID' 판단) + base_offset=1
+    for r, row in enumerate(tem_values):
         if not row:
             continue
-        base_offset = 1 if len(row) > 0 and header_key(row[0]) == "pid" else 0
-        keys = [header_key(x) for x in row[base_offset:]]
+        if header_key(row[0]) == "pid":
+            ix_map = _try_parse_row_as_header(row, base_offset_guess=1)
+            if ix_map:
+                return r, 1, ix_map
 
-        ix_map: Dict[str, int] = {}
-        # Variation / SKU / Cover / IPv
-        for i, k in enumerate(keys):
-            if "variation" not in ix_map and k in WANT["variation"]:
-                ix_map["variation"] = i
-            if "sku" not in ix_map and k in WANT["sku"]:
-                ix_map["sku"] = i
-            if "cover" not in ix_map and k in WANT["cover"]:
-                ix_map["cover"] = i
-            if "ipv" not in ix_map and k in WANT["ipv"]:
-                ix_map["ipv"] = i
-        # Item Image 1..8
-        for n in range(1, 9):
-            target = header_key(f"item image {n}")
-            for i, k in enumerate(keys):
-                if k == target:
-                    ix_map[f"item{n}"] = i
-                    break
+    # 2) 2차: B열이 'Category'인 행을 헤더로 가정 + base_offset=1
+    for r, row in enumerate(tem_values):
+        if len(row) > 1 and header_key(row[1]) == "category":
+            ix_map = _try_parse_row_as_header(row, base_offset_guess=1)
+            if ix_map:
+                return r, 1, ix_map
 
-        has_variation = "variation" in ix_map
-        has_any_image = ("cover" in ix_map) or ("ipv" in ix_map) or any(f"item{n}" in ix_map for n in range(1, 9))
-        if has_variation and has_any_image:
-            return r, base_offset, ix_map
-
-    raise RuntimeError("TEM_OUTPUT 헤더 행을 찾지 못했습니다 (Variation/이미지 관련 컬럼 누락).")
-
-def _build_details_count_by_var(collection_values: List[List[str]]) -> Dict[str, int]:
-    """Collection 시트에서 Details Index를 읽어 {variation: dcount}를 만든다."""
-    VAR_KEYS = {"variationintegrationno.", "variationno.", "variationintegration", "variation"}
-    DET_KEYS = {
-        "detailsindex", "details", "detailindex",
-        "detailimagecount", "detailscount", "detailcount",
-        "detailimages", "detailimage"
-    }
-    if not collection_values:
-        return {}
-
-    hdr = collection_values[0]
-    keys = [header_key(x) for x in hdr]
-    ix_var = ix_det = None
-    for i, k in enumerate(keys):
-        if ix_var is None and k in VAR_KEYS:
-            ix_var = i
-        if ix_det is None and k in DET_KEYS:
-            ix_det = i
-    if ix_var is None or ix_det is None:
-        return {}
-
-    out: Dict[str, int] = {}
-    for row in collection_values[1:]:
-        if not row or len(row) <= max(ix_var, ix_det):
+    # 3) 3차: base_offset=0도 시도 (PID가 진짜로 없게 만든 경우)
+    for r, row in enumerate(tem_values):
+        if not row:
             continue
-        var_no = str(row[ix_var]).strip()
-        det_raw = str(row[ix_det]).strip()
-        if not var_no:
-            continue
-        try:
-            dcount = int(float(det_raw)) if det_raw != "" else 0
-        except ValueError:
-            dcount = 0
-        out[var_no] = max(0, min(8, dcount))
-    return out
+        ix_map = _try_parse_row_as_header(row, base_offset_guess=0)
+        if ix_map:
+            return r, 0, ix_map
+
+    # 실패 시 어떤 키들이 보였는지 힌트를 남김
+    sample = next((row for row in tem_values if any(str(c).strip() for c in row)), [])
+    seen = [header_key(x) for x in sample]
+    raise RuntimeError(
+        "TEM_OUTPUT 헤더 행을 찾지 못했습니다 (Variation/이미지 관련 컬럼 누락). "
+        f"예시 행 키: {seen[:15]}"
+    )
+
 
 # -------------------------------------------------------------------
 # C5: Image URL 채우기 (데이터 버전)
