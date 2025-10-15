@@ -21,6 +21,32 @@ from .utils_creator import (
     forward_fill_by_group, # join_url 제거됨
     extract_sheet_id, _is_true # 🚨 _is_true 임포트
 )
+# creation_steps.py 맨 위쪽에 추가
+from gspread.exceptions import WorksheetNotFound
+
+def _find_worksheet_by_alias(sh, aliases):
+    """
+    탭 이름을 유연하게 찾는다.
+    1) 정확 매칭(대소문자/공백 무시)
+    2) 부분 매칭(aliases 중 하나가 포함되면 OK)
+    """
+    want = {str(a).strip().lower() for a in aliases if str(a).strip()}
+    sheets = sh.worksheets()
+
+    # 1) 정확 매칭
+    for ws in sheets:
+        if ws.title.strip().lower() in want:
+            return ws
+
+    # 2) 부분 매칭
+    for ws in sheets:
+        t = ws.title.strip().lower()
+        if any(a in t for a in want):
+            return ws
+
+    raise WorksheetNotFound(
+        f"Sheet not found by aliases: {aliases}; existing={[w.title for w in sheets]}"
+    )
 
 
 # -------------------------------------------------------------------
