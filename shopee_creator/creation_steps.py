@@ -121,7 +121,7 @@ def _collect_indices(header_row: List[str]) -> Dict[str, int]:
 
     return {
         "create": idx("create", ["use", "apply"]),
-        "variation": idx("variation", ["variationno", "variationintegrationno", "var code", "variation code"]),
+        "variation": idx("variation", ["variationno", "variationintegrationno", "var code", "variation code", "parent sku", "parentsku"]),
         "sku": idx("sku", ["seller_sku"]),
         "brand": idx("brand", ["brandname"]),
         "option_eng": idx("option(eng)", ["optioneng", "option", "option1", "option name", "option for variation 1"]),
@@ -258,6 +258,8 @@ def run_step_C2(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet) -> None:
         set_if_exists(headers, tem_row, "product description", desc)
         set_if_exists(headers, tem_row, "variation integration", variation)
         set_if_exists(headers, tem_row, "variation name1", "Options")
+        set_if_exists(headers, tem_row, "parent sku", variation)
+        set_if_exists(headers, tem_row, "variation integration no.", variation)
         set_if_exists(headers, tem_row, "option for variation 1", opt1)
         set_if_exists(headers, tem_row, "sku", sku)
         set_if_exists(headers, tem_row, "brand", brand)
@@ -359,8 +361,107 @@ def run_step_C3_fda(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet, overwrite
 # C4: (보류) 가격 매핑
 # -------------------------------------------------------------------
 def run_step_C4_prices(sh: gspread.Spreadsheet) -> None:
-    print("\n[ Create ] Step C4: Prices (Skipped/Placeholder)")
-    pass
+    print("\n[ Create ] Step C4: Prices Mapping ...")
+
+    tem_name = get_tem_sheet_name()
+
+    # 1) 워크시트 핸들
+    tem_ws = safe_worksheet(sh, tem_name)
+    try:
+        coll_ws = _find_worksheet_by_alias(
+            sh, ["Collection", "collection", "collections", "raw", "sheet1", "상품정보", "상품", "수집", "수집데이터"]
+        )
+    except Exception:
+        coll_ws = safe_worksheet(sh, "Collection")
+
+    tem_vals = with_retry(lambda: tem_ws.get_all_values()) or []
+    coll_vals = with_retry(lambda: coll_ws.get_all_values()) or []
+
+    if not tem_vals or not coll_vals:
+        print("[C4] TEM/Collection 비어 있음. 스킵.")
+        return
+
+    # 2) Collection에서 Parent SKU(=variation 별칭)와 가격 컬럼 찾기
+    coll_hdr = coll_vals[0]
+    coll_keys = [header_key(x) for x in coll_hdr]
+
+    def cidx(name, aliases=[]):
+        return _find_col_index(coll_keys, name, extra_alias=aliases)
+
+    ix_parent = cidx("parent sku", ["parentsku", "variation", "variationintegrationno", "variation no", "variation code"])
+    ix_price  = cidx("price", ["sale price", "selling price", "판매가"])
+    ix_orig   = cidx("original price", ["list price", "msrp", "정가", "원가", "originalprice"])
+
+    if ix_parent == -1 or (ix_price == -1 and ix_orig == -1):
+        print("[C4] 가격 맵핑을 위한 컬럼(Parent SKU/Price)이 Collection에 없습니다. 스킵.")
+        return
+
+    price_by_parent: Dict[str, Dict[str, str]] = {}
+    for r in range(1, len(coll_vals)):
+        row = coll_vals[r]
+        if not row:
+            continue
+        parent = (row[ix_parent] if ix_parent < len(row) else "").strip()
+        if not parent:
+            continue
+        rec = price_by_parent.setdefault(parent, {})
+        if ix_price != -1 and ix_price < len(row) and str(row[ix_price]).strip():
+            rec["price"] = str(row[ix_price]).strip()
+        if ix_orig != -1 and ix_orig < len(row) and str(row[ix_orig]).strip():
+            rec["original"] = str(row[ix_orig]).strip()
+
+    if not price_by_parent:
+        print("[C4] 가격 데이터가 없습니다. 스킵.")
+        return
+
+    # 3) TEM_OUTPUT에서 헤더행들 순회하며 가격 칸 업데이트
+    updates: List[Cell] = []
+    current_keys = None
+    idx_parent_B = idx_varint_B = idx_price_B = idx_orig_B = -1
+
+    for r0, row in enumerate(tem_vals):
+        # 헤더 행은 B열에 'Category'
+        if (row[1] if len(row) > 1 else "").strip().lower() == "category":
+            current_keys = [header_key(h) for h in row[1:]]
+            idx_parent_B  = _find_col_index(current_keys, "parent sku")
+            idx_varint_B  = _find_col_index(current_keys, "variation integration no.", ["variation integration"])
+            idx_price_B   = _find_col_index(current_keys, "price", ["selling price", "sale price"])
+            idx_orig_B    = _find_col_index(current_keys, "original price", ["list price", "msrp"])
+            continue
+
+        if not current_keys:
+            continue
+
+        # lookup key: Parent SKU 우선, 없으면 Variation Integration No.
+        parent = (row[idx_parent_B + 1] if idx_parent_B != -1 and len(row) > idx_parent_B + 1 else "").strip()
+        if not parent:
+            parent = (row[idx_varint_B + 1] if idx_varint_B != -1 and len(row) > idx_varint_B + 1 else "").strip()
+        if not parent:
+            continue
+
+        rec = price_by_parent.get(parent)
+        if not rec:
+            continue
+
+        # price
+        if idx_price_B != -1 and "price" in rec:
+            sheet_col = idx_price_B + 2
+            cur = (row[sheet_col - 1] if len(row) >= sheet_col else "").strip()
+            if cur != rec["price"]:
+                updates.append(Cell(row=r0 + 1, col=sheet_col, value=rec["price"]))
+
+        # original price
+        if idx_orig_B != -1 and "original" in rec:
+            sheet_col = idx_orig_B + 2
+            cur = (row[sheet_col - 1] if len(row) >= sheet_col else "").strip()
+            if cur != rec["original"]:
+                updates.append(Cell(row=r0 + 1, col=sheet_col, value=rec["original"]))
+
+    if updates:
+        with_retry(lambda: tem_ws.update_cells(updates, value_input_option="RAW"))
+
+    print(f"[C4] Prices mapped. Updates: {len(updates)} cells")
+
 
 # -------------------------------------------------------------------
 # C5 전용 헬퍼
@@ -654,6 +755,7 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet) -> None:
             idx_t_weight = _find_col_index(cur_headers, "weight")
             idx_t_brand  = _find_col_index(cur_headers, "brand")
             continue
+            idx_t_days   = _find_col_index(cur_headers, "days to ship", ["days", "leadtime", "handling time"])
             
         if not cur_headers or idx_t_sku == -1:
             continue
@@ -679,6 +781,15 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet) -> None:
             if cur != val:
                 updates.append(Cell(row=r0 + 1, col=c_brand_sheet_col, value=val))
 
+        # Days to ship = 1
+        if idx_t_days != -1:
+            val = "1"
+            c_days_sheet_col = idx_t_days + 2
+            cur = (row[c_days_sheet_col - 1] if len(row) >= c_days_sheet_col else "").strip()
+            if cur != val:
+                updates.append(Cell(row=r0 + 1, col=c_days_sheet_col, value=val))
+
+
         # Weight = MARGIN 매핑
         if idx_t_weight != -1 and sku:
             val = sku_to_weight.get(sku, "")
@@ -692,6 +803,195 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet) -> None:
         with_retry(lambda: tem_ws.update_cells(updates, value_input_option="RAW"))
 
     print(f"C6 Done. Updates: {len(updates)} cells")
+
+# ---------------- C7: Mandatory 기본값 채우기 + 색칠 ----------------
+# (필요 import)
+from collections import defaultdict
+try:
+    from .utils_creator import get_bool_env, hex_to_rgb01
+except Exception:
+    def get_bool_env(name: str, default: bool=False) -> bool:
+        v = get_env(name, None)
+        if v is None: return default
+        return str(v).strip().lower() in {"1","true","t","yes","y","on"}
+    def hex_to_rgb01(hx: str) -> dict:
+        hx = (hx or "").lstrip("#")
+        if len(hx) == 3: hx = "".join(c*2 for c in hx)
+        if len(hx) != 6: return {"red":1.0,"green":1.0,"blue":0.8}
+        r = int(hx[0:2],16); g = int(hx[2:4],16); b = int(hx[4:6],16)
+        return {"red": r/255.0, "green": g/255.0, "blue": b/255.0}
+
+def _norm_cat_for_match(s: str) -> str:
+    if not s: return ""
+    x = str(s).strip().lower()
+    x = x.replace(" - ", "/").replace("-", "/").replace("\\", "/").replace(" / ", "/")
+    x = "/".join(seg.strip() for seg in x.split("/") if seg.strip())
+    while "//" in x: x = x.replace("//", "/")
+    return x
+
+def _read_mandatory_defaults_from_ref(ref) -> Dict[str, Dict[str, str]]:
+    def _read_defaults_ws(ws):
+        vals = with_retry(lambda: ws.get_all_values()) or []
+        if not vals: return {}
+        keys = [header_key(x) for x in vals[0]]
+        c_idx = _find_col_index(keys, "category")
+        a_idx = _find_col_index(keys, "attribute", ["attr","property"])
+        d_idx = _find_col_index(keys, "defaultvalue", ["default"])
+        if min(c_idx, a_idx, d_idx) < 0: return {}
+        out = {}
+        for r in range(1, len(vals)):
+            row = vals[r]
+            cat  = (row[c_idx] if c_idx < len(row) else "").strip()
+            attr = (row[a_idx] if a_idx < len(row) else "").strip()
+            dval = (row[d_idx] if d_idx < len(row) else "").strip()
+            if cat and attr:
+                out.setdefault(_norm_cat_for_match(cat), {})[header_key(attr)] = dval
+        return out
+    sheets = with_retry(lambda: ref.worksheets())
+    defaults_map: Dict[str, Dict[str, str]] = {}
+    for ws in sheets:
+        if ws.title.lower().startswith("mandatorydefaults_"):
+            for k, d in _read_defaults_ws(ws).items():
+                defaults_map.setdefault(k, {}).update(d)
+    return defaults_map
+
+def _read_category_mandatory_flags(ref) -> Dict[str, List[str]]:
+    cat_props_ws = safe_worksheet(ref, get_env("CAT_PROPS_SHEET", "cat props"))
+    vals = with_retry(lambda: cat_props_ws.get_all_values()) or []
+    out = {}
+    if vals:
+        hdr_keys = [header_key(x) for x in vals[0]]
+        for r in range(1, len(vals)):
+            row = vals[r]
+            cat = (row[0] if len(row)>0 else "").strip()
+            if not cat: continue
+            mand = [hdr_keys[j] for j, cell in enumerate(row) if str(cell).strip().lower()=="mandatory"]
+            if mand:
+                out[_norm_cat_for_match(cat)] = mand
+    return out
+
+def run_step_C7_mandatory_defaults(sh, ref):
+    print("\n[ Automation ] Step C7: Fill Mandatory Defaults...")
+    tem_name  = get_tem_sheet_name()
+    color_hex = get_env("COLOR_HEX_MANDATORY", "#FFF9C4")
+    overwrite = get_bool_env("OVERWRITE_NONEMPTY", False)
+
+    try:
+        tem_ws = safe_worksheet(sh, tem_name)
+    except WorksheetNotFound:
+        print(f"[!] {tem_name} 탭 없음. C2 이후 실행 필요."); return
+
+    defaults_map = _read_mandatory_defaults_from_ref(ref)
+    catprops_map = _read_category_mandatory_flags(ref)
+
+    vals = with_retry(lambda: tem_ws.get_all_values()) or []
+    if not vals: print("[!] TEM_OUTPUT 비어 있음."); return
+
+    # sheetId (색칠용)
+    try:
+        meta = with_retry(lambda: sh.fetch_sheet_metadata())
+        sheet_id = next((s["properties"]["sheetId"] for s in meta["sheets"] 
+                        if s["properties"]["title"] == tem_name), None)
+    except Exception:
+        sheet_id = None
+
+    updates: List[Cell] = []
+    color_ranges_by_col = defaultdict(list)
+    current_hdr_keys = None
+    total_filled = 0
+
+    def _find_defaults(cat_raw: str) -> Dict[str, str]:
+        if not cat_raw: return {}
+        nc = _norm_cat_for_match(cat_raw)
+        if nc in defaults_map: return defaults_map[nc]
+        for k in defaults_map.keys():
+            if nc.endswith(k) or k.endswith(nc): return defaults_map[k]
+        for k in defaults_map.keys():
+            if ("/"+k+"/") in ("/"+nc+"/"): return defaults_map[k]
+        return {}
+
+    def _find_mand(cat_raw: str) -> List[str]:
+        if not cat_raw: return []
+        nc = _norm_cat_for_match(cat_raw)
+        if nc in catprops_map: return catprops_map[nc]
+        for k in catprops_map.keys():
+            if nc.endswith(k) or k.endswith(nc): return catprops_map[k]
+        for k in catprops_map.keys():
+            if ("/"+k+"/") in ("/"+nc+"/"): return catprops_map[k]
+        return []
+
+    for r0, row in enumerate(vals):
+        # 헤더 인지 판별 (B열 'Category')
+        if (row[1] if len(row)>1 else "").strip().lower() == "category":
+            current_hdr_keys = [header_key(h) for h in row[1:]]
+            continue
+        if not current_hdr_keys: 
+            continue
+
+        pid = (row[0] if len(row)>0 else "").strip()
+        cat = (row[1] if len(row)>1 else "").strip()
+        if not pid or not cat: 
+            continue
+
+        # mandatory 색칠
+        mand_list = _find_mand(cat)
+        if mand_list and sheet_id is not None:
+            for attr_norm in mand_list:
+                j = _find_col_index(current_hdr_keys, attr_norm)
+                if j >= 0:
+                    color_ranges_by_col[j].append((r0, r0+1))
+
+        # 기본값 채우기
+        defaults = _find_defaults(cat)
+        for attr_norm, dval in defaults.items():
+            if not dval: continue
+            j = _find_col_index(current_hdr_keys, attr_norm)
+            if j < 0: continue
+            col_1based = j + 2
+            cur = (row[col_1based - 1] if len(row) >= col_1based else "").strip()
+            if not cur or overwrite:
+                updates.append(Cell(row=r0 + 1, col=col_1based, value=dval))
+                total_filled += 1
+
+    if updates:
+        with_retry(lambda: tem_ws.update_cells(updates, value_input_option="RAW"))
+
+    # 색칠 요청
+    def _merge(spans):
+        if not spans: return []
+        spans.sort()
+        merged = [spans[0]]
+        for s,e in spans[1:]:
+            ls,le = merged[-1]
+            if s <= le: merged[-1] = (ls, max(le,e))
+            else: merged.append((s,e))
+        return merged
+
+    requests = []
+    color = hex_to_rgb01(color_hex)
+    if sheet_id is not None:
+        for j, spans in color_ranges_by_col.items():
+            for s,e in _merge(spans):
+                requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": s, "endRowIndex": e,
+                            "startColumnIndex": 1 + j, "endColumnIndex": 1 + j + 1
+                        },
+                        "cell": {"userEnteredFormat": {"backgroundColor": color}},
+                        "fields": "userEnteredFormat.backgroundColor"
+                    }
+                })
+        if requests:
+            with_retry(lambda: sh.batch_update({"requests": requests}))
+
+    print("========== C7 Mandatory Defaults RESULT ==========")
+    print(f"채워진 셀 수: {total_filled:,}")
+    print(f"색칠된 'mandatory' 열 개수: {len(color_ranges_by_col):,}")
+    print("Step C7: Fill Mandatory Defaults Finished.")
+
+
 
 # -------------------------------------------------------------------
 # Export helpers (xlsx / csv)
@@ -818,3 +1118,5 @@ run_c3_fda = run_step_C3_fda
 run_c4_price = run_step_C4_prices
 run_c5_images = run_step_C5_images
 run_c6_swb = run_step_C6_stock_weight_brand
+run_c7_mandatory = run_step_C7_mandatory_defaults
+

@@ -75,6 +75,7 @@ class ShopeeCreator:
         pipeline = [
             ("C1 Prepare TEM_OUTPUT", lambda: steps.run_step_C1(sh, ref)),
             ("C2 Collection → TEM",  lambda: steps.run_step_C2(sh, ref)),
+            ("C7 Mandatory Defaults", lambda: steps.run_step_C7_mandatory_defaults(sh, ref)),
             ("C3 FDA Fill",          lambda: steps.run_step_C3_fda(sh, ref)),
             ("C4 Prices",            lambda: steps.run_step_C4_prices(sh)),
             # ✅ C5: creation_steps.run_step_C5_images 사용 (입력 그대로 전달)
