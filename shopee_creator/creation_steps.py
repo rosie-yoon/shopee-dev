@@ -381,7 +381,7 @@ def run_step_C4_prices(sh: gspread.Spreadsheet) -> None:
         print("[C4] TEM/Collection 비어 있음. 스킵.")
         return
 
-    # 2) Collection에서 Parent SKU(=variation 별칭)와 가격 컬럼 찾기
+    # 2) Collection에서 Parent SKU(variation 별칭)와 가격 컬럼 찾기
     coll_hdr = coll_vals[0]
     coll_keys = [header_key(x) for x in coll_hdr]
 
@@ -389,11 +389,11 @@ def run_step_C4_prices(sh: gspread.Spreadsheet) -> None:
         return _find_col_index(coll_keys, name, extra_alias=aliases)
 
     ix_parent = cidx("parent sku", ["parentsku", "variation", "variationintegrationno", "variation no", "variation code"])
-    ix_price  = cidx("price", ["sale price", "selling price", "판매가"])
+    ix_price  = cidx("price", ["sale price", "selling price", "판매가", "global sku price"])   # ← 보강
     ix_orig   = cidx("original price", ["list price", "msrp", "정가", "원가", "originalprice"])
 
     if ix_parent == -1 or (ix_price == -1 and ix_orig == -1):
-        print("[C4] 가격 맵핑을 위한 컬럼(Parent SKU/Price)이 Collection에 없습니다. 스킵.")
+        print("[C4] 가격 맵핑 컬럼(Parent SKU/Price)이 Collection에 없습니다. 스킵.")
         return
 
     price_by_parent: Dict[str, Dict[str, str]] = {}
@@ -423,9 +423,10 @@ def run_step_C4_prices(sh: gspread.Spreadsheet) -> None:
         # 헤더 행은 B열에 'Category'
         if (row[1] if len(row) > 1 else "").strip().lower() == "category":
             current_keys = [header_key(h) for h in row[1:]]
-            idx_parent_B  = _find_col_index(current_keys, "parent sku")
+            idx_parent_B  = _find_col_index(current_keys, "parent sku", ["parentsku"])
             idx_varint_B  = _find_col_index(current_keys, "variation integration no.", ["variation integration"])
-            idx_price_B   = _find_col_index(current_keys, "global sku price", ["selling price", "sale price"])
+            # TEM 쪽도 Global SKU Price 헤더 지원
+            idx_price_B   = _find_col_index(current_keys, "global sku price", ["price", "selling price", "sale price"])
             idx_orig_B    = _find_col_index(current_keys, "original price", ["list price", "msrp"])
             continue
 
@@ -443,12 +444,20 @@ def run_step_C4_prices(sh: gspread.Spreadsheet) -> None:
         if not rec:
             continue
 
-        # price
+        # Global SKU Price / Price
         if idx_price_B != -1 and "price" in rec:
             sheet_col = idx_price_B + 2
             cur = (row[sheet_col - 1] if len(row) >= sheet_col else "").strip()
             if cur != rec["price"]:
                 updates.append(Cell(row=r0 + 1, col=sheet_col, value=rec["price"]))
+        else:
+            # fallback: TEM에 'price'만 있을 때
+            idx_price_fb = _find_col_index(current_keys, "price", ["selling price", "sale price"])
+            if idx_price_fb != -1 and "price" in rec:
+                sheet_col_fb = idx_price_fb + 2
+                cur_fb = (row[sheet_col_fb - 1] if len(row) >= sheet_col_fb else "").strip()
+                if cur_fb != rec["price"]:
+                    updates.append(Cell(row=r0 + 1, col=sheet_col_fb, value=rec["price"]))
 
         # original price
         if idx_orig_B != -1 and "original" in rec:
@@ -581,35 +590,31 @@ def _find_header_row_and_offset(tem_values: List[List[str]]) -> tuple[int, int, 
 
 # C5 전용: Collection에서 Variation별 상세이미지 개수 맵 만들기
 def _build_details_count_by_var(collection_values: List[List[str]]) -> Dict[str, int]:
-    """
-    Collection 시트에서 Details Index를 읽어 {variation_no: dcount}를 만든다.
-    - 헤더 별칭을 폭넓게 허용 (Details Index / Details / Detail Index / Detail Image Count / Details Count ...)
-    - dcount는 0~8로 클램프
-    """
-    VAR_KEYS = {"variationintegrationno.", "variationno.", "variationintegration", "variation"}
+    """Collection 시트에서 Details Index를 읽어 {variation(or parent sku): dcount}를 만든다."""
+    VAR_KEYS = {
+        "variationintegrationno.", "variationno.", "variationintegration", "variation",
+        "parent sku", "parentsku"  # ← Parent SKU도 Variation 키로 인정
+    }
     DET_KEYS = {
         "detailsindex", "details", "detailindex",
         "detailimagecount", "detailscount", "detailcount",
         "detailimages", "detailimage"
     }
-
     if not collection_values:
         return {}
 
-    # 1행: 헤더
-    header = collection_values[0]
-    hdr_keys = [header_key(x) for x in header]
-
+    hdr = collection_values[0]
+    keys = [header_key(x) for x in hdr]
     ix_var = ix_det = None
-    for i, k in enumerate(hdr_keys):
-        if ix_var is None and k in VAR_KEYS: ix_var = i
-        if ix_det is None and k in DET_KEYS: ix_det = i
-
+    for i, k in enumerate(keys):
+        if ix_var is None and k in VAR_KEYS:
+            ix_var = i
+        if ix_det is None and k in DET_KEYS:
+            ix_det = i
     if ix_var is None or ix_det is None:
-        # 헤더가 없으면 D이미지 생성을 생략(커버/IPv는 그대로 처리)
         return {}
 
-    dmap: Dict[str, int] = {}
+    out: Dict[str, int] = {}
     for row in collection_values[1:]:
         if not row or len(row) <= max(ix_var, ix_det):
             continue
@@ -621,8 +626,8 @@ def _build_details_count_by_var(collection_values: List[List[str]]) -> Dict[str,
             dcount = int(float(det_raw)) if det_raw != "" else 0
         except ValueError:
             dcount = 0
-        dmap[var_no] = max(0, min(8, dcount))  # 0~8
-    return dmap
+        out[var_no] = max(0, min(8, dcount))
+    return out
 
 
 # -------------------------------------------------------------------
@@ -708,7 +713,7 @@ def run_step_C5_images(sh: gspread.Spreadsheet, base_url: str, shop_code: str):
 # C6: Stock/Weight/Brand 보정 (MARGIN 시트 기반)
 # -------------------------------------------------------------------
 def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet) -> None:
-    print("\n[ Create ] Step C6: Fill Stock, Weight, Brand ...")
+    print("\n[ Create ] Step C6: Fill Stock, Weight, Brand, Days ...")
     tem_name = get_tem_sheet_name()
     
     try:
@@ -728,8 +733,8 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet) -> None:
         mg_ws = safe_worksheet(sh, "MARGIN")
         mg_vals = with_retry(lambda: mg_ws.get_all_values()) or []
         if len(mg_vals) >= 2:
-            idx_mg_sku = _pick_index_by_candidates(mg_vals[0], ["sku", "seller_sku"])
-            idx_mg_weight = _pick_index_by_candidates(mg_vals[0], ["weight", "package weight"])
+            idx_mg_sku = _pick_index_by_candidates(mg_vals[0], ["sku", "seller_sku", "item sku"])
+            idx_mg_weight = _pick_index_by_candidates(mg_vals[0], ["weight", "package weight", "gross weight"])
             if idx_mg_sku != -1 and idx_mg_weight != -1:
                 for r in range(1, len(mg_vals)):
                     row = mg_vals[r]
@@ -744,18 +749,20 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet) -> None:
 
     updates: List[Cell] = []
     cur_headers = None
-    idx_t_sku = idx_t_stock = idx_t_weight = idx_t_brand = -1
+    # 인덱스 기본값
+    idx_t_sku = idx_t_stock = idx_t_weight = idx_t_brand = idx_t_days = idx_t_cat = -1
 
     for r0, row in enumerate(tem_vals):
         # 헤더 행 찾기 (B열='Category')
         if (row[1] if len(row) > 1 else "").strip().lower() == "category":
             cur_headers = [header_key(h) for h in row[1:]]
-            idx_t_sku    = _find_col_index(cur_headers, "sku")
-            idx_t_stock  = _find_col_index(cur_headers, "stock")
-            idx_t_weight = _find_col_index(cur_headers, "weight")
-            idx_t_brand  = _find_col_index(cur_headers, "brand")
+            idx_t_sku    = _find_col_index(cur_headers, "sku", ["seller_sku", "item sku"])
+            idx_t_stock  = _find_col_index(cur_headers, "stock", ["qty", "quantity", "inventory"])
+            idx_t_weight = _find_col_index(cur_headers, "weight", ["package weight", "gross weight"])
+            idx_t_brand  = _find_col_index(cur_headers, "brand", ["brand name", "brandname"])
+            idx_t_days   = _find_col_index(cur_headers, "days to ship", ["days", "leadtime", "handling time", "handling days", "shipping days"])
+            idx_t_cat    = _find_col_index(cur_headers, "category")
             continue
-            idx_t_days   = _find_col_index(cur_headers, "days to ship", ["days", "leadtime", "handling time"])
             
         if not cur_headers or idx_t_sku == -1:
             continue
@@ -773,7 +780,7 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet) -> None:
             if cur != val:
                 updates.append(Cell(row=r0 + 1, col=c_stock_sheet_col, value=val))
 
-        # Brand = 0
+        # Brand = 0 (항상 덮어쓰기)
         if idx_t_brand != -1:
             val = "0"
             c_brand_sheet_col = idx_t_brand + 2
@@ -788,7 +795,6 @@ def run_step_C6_stock_weight_brand(sh: gspread.Spreadsheet) -> None:
             cur = (row[c_days_sheet_col - 1] if len(row) >= c_days_sheet_col else "").strip()
             if cur != val:
                 updates.append(Cell(row=r0 + 1, col=c_days_sheet_col, value=val))
-
 
         # Weight = MARGIN 매핑
         if idx_t_weight != -1 and sku:
