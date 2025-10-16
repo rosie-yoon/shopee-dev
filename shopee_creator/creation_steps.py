@@ -425,7 +425,7 @@ def run_step_C4_prices(sh: gspread.Spreadsheet) -> None:
             current_keys = [header_key(h) for h in row[1:]]
             idx_parent_B  = _find_col_index(current_keys, "parent sku")
             idx_varint_B  = _find_col_index(current_keys, "variation integration no.", ["variation integration"])
-            idx_price_B   = _find_col_index(current_keys, "price", ["selling price", "sale price"])
+            idx_price_B   = _find_col_index(current_keys, "global sku price", ["selling price", "sale price"])
             idx_orig_B    = _find_col_index(current_keys, "original price", ["list price", "msrp"])
             continue
 
