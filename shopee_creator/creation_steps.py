@@ -361,115 +361,124 @@ def run_step_C3_fda(sh: gspread.Spreadsheet, ref: gspread.Spreadsheet, overwrite
 # C4: (보류) 가격 매핑
 # -------------------------------------------------------------------
 def run_step_C4_prices(sh: gspread.Spreadsheet) -> None:
-    print("\n[ Create ] Step C4: Prices Mapping ...")
+    print("\n[ Create ] Step C4: Prices Mapping (MARGIN→TEM; fallback=Collection) ...")
 
     tem_name = get_tem_sheet_name()
-
-    # 1) 워크시트 핸들
     tem_ws = safe_worksheet(sh, tem_name)
+
+    # ---------- MARGIN에서 SKU↔가격 맵 구축 ----------
+    margin_price_by_sku: Dict[str, str] = {}
     try:
-        coll_ws = _find_worksheet_by_alias(
-            sh, ["Collection", "collection", "collections", "raw", "sheet1", "상품정보", "상품", "수집", "수집데이터"]
-        )
-    except Exception:
-        coll_ws = safe_worksheet(sh, "Collection")
+        mg_ws = safe_worksheet(sh, "MARGIN")
+        mg_vals = with_retry(lambda: mg_ws.get_all_values()) or []
+        if len(mg_vals) >= 2:
+            hdr = [header_key(x) for x in mg_vals[0]]
+            ix_sku  = _find_col_index(hdr, "sku", ["seller_sku", "item sku"])
+            # '소비자가' 우선, 다양한 영어 표기 보조
+            ix_cpr  = _find_col_index(hdr, "소비자가", ["consumer price", "global sku price", "price"])
+            if ix_sku != -1 and ix_cpr != -1:
+                for r in range(1, len(mg_vals)):
+                    row = mg_vals[r]
+                    sku = (row[ix_sku] if ix_sku < len(row) else "").strip()
+                    prc = (row[ix_cpr] if ix_cpr < len(row) else "").strip()
+                    if sku and prc:
+                        margin_price_by_sku[sku] = prc
+    except WorksheetNotFound:
+        print("[C4] MARGIN 시트 없음 → MARGIN 가격 맵 생략.")
 
-    tem_vals = with_retry(lambda: tem_ws.get_all_values()) or []
-    coll_vals = with_retry(lambda: coll_ws.get_all_values()) or []
-
-    if not tem_vals or not coll_vals:
-        print("[C4] TEM/Collection 비어 있음. 스킵.")
-        return
-
-    # 2) Collection에서 Parent SKU(variation 별칭)와 가격 컬럼 찾기
-    coll_hdr = coll_vals[0]
-    coll_keys = [header_key(x) for x in coll_hdr]
-
-    def cidx(name, aliases=[]):
-        return _find_col_index(coll_keys, name, extra_alias=aliases)
-
-    ix_parent = cidx("parent sku", ["parentsku", "variation", "variationintegrationno", "variation no", "variation code"])
-    ix_price  = cidx("price", ["sale price", "selling price", "판매가", "global sku price"])   # ← 보강
-    ix_orig   = cidx("original price", ["list price", "msrp", "정가", "원가", "originalprice"])
-
-    if ix_parent == -1 or (ix_price == -1 and ix_orig == -1):
-        print("[C4] 가격 맵핑 컬럼(Parent SKU/Price)이 Collection에 없습니다. 스킵.")
-        return
-
+    # ---------- Collection에서 Parent SKU↔가격 맵 (보조) ----------
     price_by_parent: Dict[str, Dict[str, str]] = {}
-    for r in range(1, len(coll_vals)):
-        row = coll_vals[r]
-        if not row:
-            continue
-        parent = (row[ix_parent] if ix_parent < len(row) else "").strip()
-        if not parent:
-            continue
-        rec = price_by_parent.setdefault(parent, {})
-        if ix_price != -1 and ix_price < len(row) and str(row[ix_price]).strip():
-            rec["price"] = str(row[ix_price]).strip()
-        if ix_orig != -1 and ix_orig < len(row) and str(row[ix_orig]).strip():
-            rec["original"] = str(row[ix_orig]).strip()
+    try:
+        try:
+            coll_ws = _find_worksheet_by_alias(
+                sh, ["Collection", "collection", "collections", "raw", "sheet1", "상품정보", "상품", "수집", "수집데이터"]
+            )
+        except Exception:
+            coll_ws = safe_worksheet(sh, "Collection")
 
-    if not price_by_parent:
-        print("[C4] 가격 데이터가 없습니다. 스킵.")
+        coll_vals = with_retry(lambda: coll_ws.get_all_values()) or []
+        if coll_vals:
+            hdr = [header_key(x) for x in coll_vals[0]]
+            def cidx(name, aliases=[]):
+                return _find_col_index(hdr, name, extra_alias=aliases)
+            ix_parent = cidx("parent sku", ["parentsku", "variation", "variationintegrationno", "variation no", "variation code"])
+            ix_price  = cidx("price", ["sale price", "selling price", "판매가", "global sku price"])
+            ix_orig   = cidx("original price", ["list price", "msrp", "정가", "원가", "originalprice"])
+            if ix_parent != -1 and (ix_price != -1 or ix_orig != -1):
+                for r in range(1, len(coll_vals)):
+                    row = coll_vals[r]
+                    if not row:
+                        continue
+                    parent = (row[ix_parent] if ix_parent < len(row) else "").strip()
+                    if not parent:
+                        continue
+                    rec = price_by_parent.setdefault(parent, {})
+                    if ix_price != -1 and ix_price < len(row) and str(row[ix_price]).strip():
+                        rec["price"] = str(row[ix_price]).strip()
+                    if ix_orig != -1 and ix_orig < len(row) and str(row[ix_orig]).strip():
+                        rec["original"] = str(row[ix_orig]).strip()
+    except Exception as e:
+        print(f"[C4] Collection 가격 보조 로딩 실패: {e}")
+
+    # ---------- TEM에 쓰기 ----------
+    tem_vals = with_retry(lambda: tem_ws.get_all_values()) or []
+    if not tem_vals:
+        print("[C4] TEM_OUTPUT 비어 있음.")
         return
 
-    # 3) TEM_OUTPUT에서 헤더행들 순회하며 가격 칸 업데이트
     updates: List[Cell] = []
-    current_keys = None
-    idx_parent_B = idx_varint_B = idx_price_B = idx_orig_B = -1
+    cur_hdr = None
+    idx_sku_B = idx_parent_B = idx_varint_B = idx_gprice_B = idx_price_B = idx_orig_B = -1
 
     for r0, row in enumerate(tem_vals):
-        # 헤더 행은 B열에 'Category'
         if (row[1] if len(row) > 1 else "").strip().lower() == "category":
-            current_keys = [header_key(h) for h in row[1:]]
-            idx_parent_B  = _find_col_index(current_keys, "parent sku", ["parentsku"])
-            idx_varint_B  = _find_col_index(current_keys, "variation integration no.", ["variation integration"])
-            # TEM 쪽도 Global SKU Price 헤더 지원
-            idx_price_B   = _find_col_index(current_keys, "global sku price", ["price", "selling price", "sale price"])
-            idx_orig_B    = _find_col_index(current_keys, "original price", ["list price", "msrp"])
+            cur_hdr = [header_key(h) for h in row[1:]]
+            idx_sku_B    = _find_col_index(cur_hdr, "sku", ["seller_sku", "item sku"])
+            idx_parent_B = _find_col_index(cur_hdr, "parent sku", ["parentsku"])
+            idx_varint_B = _find_col_index(cur_hdr, "variation integration no.", ["variation integration"])
+            idx_gprice_B = _find_col_index(cur_hdr, "global sku price", ["price", "selling price", "sale price"])
+            idx_price_B  = _find_col_index(cur_hdr, "price", ["selling price", "sale price"])
+            idx_orig_B   = _find_col_index(cur_hdr, "original price", ["list price", "msrp"])
+            continue
+        if not cur_hdr:
             continue
 
-        if not current_keys:
-            continue
+        # 1) 우선순위: SKU → MARGIN 소비자가
+        sku = (row[idx_sku_B + 1] if idx_sku_B != -1 and len(row) > idx_sku_B + 1 else "").strip()
+        price_from_margin = margin_price_by_sku.get(sku, "")
 
-        # lookup key: Parent SKU 우선, 없으면 Variation Integration No.
+        # 2) 보조: Parent SKU/VarInt → Collection 가격
         parent = (row[idx_parent_B + 1] if idx_parent_B != -1 and len(row) > idx_parent_B + 1 else "").strip()
         if not parent:
             parent = (row[idx_varint_B + 1] if idx_varint_B != -1 and len(row) > idx_varint_B + 1 else "").strip()
-        if not parent:
-            continue
-
-        rec = price_by_parent.get(parent)
-        if not rec:
-            continue
+        rec = price_by_parent.get(parent, {})
 
         # Global SKU Price / Price
-        if idx_price_B != -1 and "price" in rec:
-            sheet_col = idx_price_B + 2
-            cur = (row[sheet_col - 1] if len(row) >= sheet_col else "").strip()
-            if cur != rec["price"]:
-                updates.append(Cell(row=r0 + 1, col=sheet_col, value=rec["price"]))
-        else:
-            # fallback: TEM에 'price'만 있을 때
-            idx_price_fb = _find_col_index(current_keys, "price", ["selling price", "sale price"])
-            if idx_price_fb != -1 and "price" in rec:
-                sheet_col_fb = idx_price_fb + 2
-                cur_fb = (row[sheet_col_fb - 1] if len(row) >= sheet_col_fb else "").strip()
-                if cur_fb != rec["price"]:
-                    updates.append(Cell(row=r0 + 1, col=sheet_col_fb, value=rec["price"]))
+        final_price = price_from_margin or rec.get("price", "")
+        if final_price:
+            if idx_gprice_B != -1:
+                sc = idx_gprice_B + 2
+                cur = (row[sc - 1] if len(row) >= sc else "").strip()
+                if cur != final_price:
+                    updates.append(Cell(row=r0 + 1, col=sc, value=final_price))
+            elif idx_price_B != -1:
+                sc = idx_price_B + 2
+                cur = (row[sc - 1] if len(row) >= sc else "").strip()
+                if cur != final_price:
+                    updates.append(Cell(row=r0 + 1, col=sc, value=final_price))
 
-        # original price
+        # original price (Collection에 있을 때만)
         if idx_orig_B != -1 and "original" in rec:
-            sheet_col = idx_orig_B + 2
-            cur = (row[sheet_col - 1] if len(row) >= sheet_col else "").strip()
+            sc = idx_orig_B + 2
+            cur = (row[sc - 1] if len(row) >= sc else "").strip()
             if cur != rec["original"]:
-                updates.append(Cell(row=r0 + 1, col=sheet_col, value=rec["original"]))
+                updates.append(Cell(row=r0 + 1, col=sc, value=rec["original"]))
 
     if updates:
         with_retry(lambda: tem_ws.update_cells(updates, value_input_option="RAW"))
 
     print(f"[C4] Prices mapped. Updates: {len(updates)} cells")
+
 
 
 # -------------------------------------------------------------------
@@ -656,6 +665,10 @@ def run_step_C5_images_values(
     for r in range(hdr_row + 1, len(out)):
         row = out[r]
         data = row[base_offset:]
+        # --- 중간 헤더 행 스킵: B열이 'Category'면 이 행은 헤더 ---
+        if len(data) > 0 and header_key(data[0]) == "category":
+            continue
+
         if not data:
             continue
 
